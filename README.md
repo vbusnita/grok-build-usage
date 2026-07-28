@@ -8,9 +8,13 @@ Works with **your** Grok login: it reuses the session Grok Build already stores 
 
 > Unofficial community tool. Not affiliated with xAI. Billing endpoints can change; if they do, open an issue.
 
-## Screenshot / vibe
+## Screenshot
 
-Floating chrome-free overlay (title · progress bar · RESET / CREDITS / AUTO TOPUP) plus a menu-bar title like `GBU · 26%`. Toggle the overlay from the menu bar anytime.
+Floating chrome-free overlay on the desktop, with the menu bar title (`GBU · 29%`) and live account pool:
+
+![Grok Build Usage overlay — weekly limit bar, reset time, credits, auto top-up](docs/media/overlay-screenshot.jpg)
+
+Toggle the overlay from the menu bar anytime (**Hide / Show Overlay**).
 
 ## Requirements
 
