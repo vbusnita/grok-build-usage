@@ -11,7 +11,8 @@ set -euo pipefail
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 APP_NAME="Grok Build Usage"
 APP_DIR="${HOME}/Applications/${APP_NAME}.app"
-BUNDLE_ID="com.vbusnita.grok-build-usage"
+# Neutral reverse-DNS id (not personal) — used for LaunchAgent + Info.plist
+BUNDLE_ID="app.grokbuild.usage"
 LAUNCH_AGENT_DIR="${HOME}/Library/LaunchAgents"
 LAUNCH_AGENT_PLIST="${LAUNCH_AGENT_DIR}/${BUNDLE_ID}.plist"
 LOG_DIR="${HOME}/Library/Logs"
@@ -235,6 +236,9 @@ echo "==> Installed: ${APP_DIR}"
 # ── Optional LaunchAgent (start at login) ───────────────────────────────────
 if [[ "${DO_LOGIN}" -eq 1 ]]; then
   mkdir -p "${LAUNCH_AGENT_DIR}" "${LOG_DIR}"
+  # Drop legacy personal id if present so only the neutral agent remains
+  launchctl bootout "gui/$(id -u)/com.vbusnita.grok-build-usage" 2>/dev/null || true
+  rm -f "${HOME}/Library/LaunchAgents/com.vbusnita.grok-build-usage.plist"
   cat > "${LAUNCH_AGENT_PLIST}" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
