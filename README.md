@@ -36,11 +36,13 @@ That will:
 
 1. Create a local `.venv` and install this package  
 2. Build **`~/Applications/Grok Build Usage.app`** (menu-bar agent — **no Dock icon**)  
-3. Register a **LaunchAgent** so it starts at login (`--login`)  
-4. Launch it (`--open`)
+3. Embed a named Python runtime inside the app so System Settings → Desktop & Dock → **Allow in the Menu Bar** lists **Grok Build Usage** (not `python3.11`)  
+4. Register a **LaunchAgent** so it starts at login (`--login`)  
+5. Launch it (`--open`)
 
-Then look for **`GBU · …%`** in the menu bar. Use **Hide / Show Overlay**, **Refresh Now**, **Open Grok Usage…**, or **Quit**.
+Then look for the chart icon + **`GBU · …%`** in the menu bar. Use **Hide / Show Overlay**, **Refresh Now**, **Open Grok Usage…**, or **Quit**.
 
+If Settings still shows a stale **python3.11** row from an older install, turn it off (or leave it) — the live app is the **Grok Build Usage** entry.
 ### Without login-at-start
 
 ```bash
