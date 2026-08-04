@@ -331,6 +331,16 @@ def run_app(*, poll_seconds: float = POLL_SECONDS, start_hud_visible: bool = Tru
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
+    # Prefer a human name in Activity Monitor / some System Settings rows.
+    # (Control Center "Allow in the Menu Bar" still keys off code identity —
+    # install-app.sh ad-hoc signs the runtime as app.grokbuild.usage.)
+    try:
+        from Foundation import NSProcessInfo
+
+        NSProcessInfo.processInfo().setProcessName_("Grok Build Usage")
+    except Exception:
+        log.debug("setProcessName failed", exc_info=True)
+
     # Accessory policy BEFORE rumps builds the status item. Must use
     # NSApplication.sharedApplication() — bare NSApp is often None here,
     # and a silent failure was leaving the status item in a bad state.

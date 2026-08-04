@@ -42,7 +42,7 @@ That will:
 
 Then look for the chart icon + **`GBU · …%`** in the menu bar. Use **Hide / Show Overlay**, **Refresh Now**, **Open Grok Usage…**, or **Quit**.
 
-If Settings still shows a stale **python3.11** row from an older install, turn it off (or leave it) — the live app is the **Grok Build Usage** entry.
+If Settings still shows a stale **python3.11** row from an older install, **leave it OFF**. That was this app under its first (unsigned CPython) identity. After reinstall, enable **Grok Build Usage** (or **GrokBuildUsage**) instead — with python3.11 disabled and no correctly named entry allowed, the menu bar gauge never appears (status item height stays 0).
 ### Without login-at-start
 
 ```bash

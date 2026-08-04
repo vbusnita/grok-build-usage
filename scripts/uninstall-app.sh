@@ -9,6 +9,8 @@ LAUNCH_AGENT_PLIST="${HOME}/Library/LaunchAgents/${BUNDLE_ID}.plist"
 
 # Stop running instances
 pkill -f "python.*-m gbu" 2>/dev/null || true
+pkill -f "GrokBuildUsage -m gbu" 2>/dev/null || true
+pkill -f "Grok Build Usage.app/Contents/MacOS" 2>/dev/null || true
 
 # Current + legacy personal bundle id (pre-open-source)
 for id in "${BUNDLE_ID}" "com.vbusnita.grok-build-usage"; do
