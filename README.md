@@ -42,7 +42,7 @@ That will:
 
 Then look for the chart icon + **`GBU · …%`** in the menu bar. Use **Hide / Show Overlay**, **Refresh Now**, **Open Grok Usage…**, or **Quit**.
 
-If Settings still shows a stale **python3.11** row from an older install, **leave it OFF**. That was this app under its first (unsigned CPython) identity. After reinstall, enable **Grok Build Usage** (or **GrokBuildUsage**) instead — with python3.11 disabled and no correctly named entry allowed, the menu bar gauge never appears (status item height stays 0).
+**Menu Bar allow-list:** on macOS that already ran an early install, the toggle is often still labeled **python3.11**. Keep that **ON** — it is this app. Prefer starting via the LaunchAgent / `./scripts/install-app.sh --login` (direct launcher). Double-clicking the `.app` can attribute the status item under a different identity that never appears in Settings.
 ### Without login-at-start
 
 ```bash

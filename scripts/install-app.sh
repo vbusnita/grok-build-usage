@@ -109,22 +109,16 @@ echo "==> Building app bundle…"
 rm -rf "${APP_DIR}"
 mkdir -p "${APP_DIR}/Contents/MacOS" "${APP_DIR}/Contents/Resources"
 
-# Embed a copy of the interpreter under the app name (not a symlink — macOS
-# resolves symlink targets and would still label the process "python3.11").
+# Embed a copy of the interpreter under a bundle-local name (not a symlink —
+# macOS resolves symlink targets). Keep the *original* linker-signed CDHash:
+# System Settings → Menu Bar → "Allow in the Menu Bar" already has a sticky
+# row named "python3.11" for that code identity. Ad-hoc re-signing breaks the
+# match (new CDHash) and the new identity never gets its own Settings row, so
+# the status item stays permanently height-0. Correct long-term naming needs a
+# non-Python host binary + a clean Control Center registration — not re-sign.
 echo "==> Embedding interpreter as Contents/MacOS/GrokBuildUsage…"
 cp "${REAL_PYTHON}" "${APP_DIR}/Contents/MacOS/GrokBuildUsage"
 chmod +x "${APP_DIR}/Contents/MacOS/GrokBuildUsage"
-# Ad-hoc re-sign with *our* bundle id so System Settings → Menu Bar →
-# "Allow in the Menu Bar" shows "Grok Build Usage" instead of the stale
-# "python3.11" entry left over from the first (unsigned) installs. A plain
-# `cp` of CPython keeps the original linker-signed CDHash, so Control Center
-# keeps attributing the status item to python3.11.
-# Do NOT use --options runtime here: hardened runtime + library validation
-# rejects unsigned pyobjc .so files ("different Team IDs"). Ad-hoc identity
-# alone is enough for Control Center to stop calling us "python3.11".
-echo "==> Ad-hoc signing runtime as ${BUNDLE_ID}…"
-codesign -s - -f -i "${BUNDLE_ID}" \
-  "${APP_DIR}/Contents/MacOS/GrokBuildUsage"
 
 # Launcher — Launch Services entry point; execs the in-bundle runtime.
 # Logs to ~/Library/Logs. Sets PYTHONHOME/PYTHONPATH so the relocated binary
@@ -290,21 +284,15 @@ fi
 # Clear quarantine if present (downloaded / script-built apps)
 xattr -dr com.apple.quarantine "${APP_DIR}" 2>/dev/null || true
 
-# Sign the outer .app so Launch Services / Control Center attribute the
-# NSStatusItem to CFBundleDisplayName ("Grok Build Usage"), not the runtime
-# basename. Deep-sign after Resources (icon) exist.
-echo "==> Ad-hoc signing app bundle as ${BUNDLE_ID}…"
-codesign -s - -f -i "${BUNDLE_ID}" "${APP_DIR}"
-
-# Refresh Launch Services registration (helps Settings pick up the new name)
+# Refresh Launch Services registration
 if [[ -x /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister ]]; then
   /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
     -f "${APP_DIR}" 2>/dev/null || true
 fi
 
 echo "==> Installed: ${APP_DIR}"
-echo "    If Settings still lists a stale **python3.11** row, leave it OFF —"
-echo "    that is the old identity. Enable **Grok Build Usage** instead."
+echo "    Menu Bar allow-list name on this Mac is usually **python3.11** (sticky)."
+echo "    Keep that toggle ON so the GBU · % status item can appear."
 
 # ── Optional LaunchAgent (start at login) ───────────────────────────────────
 if [[ "${DO_LOGIN}" -eq 1 ]]; then
@@ -312,9 +300,10 @@ if [[ "${DO_LOGIN}" -eq 1 ]]; then
   # Drop legacy personal id if present so only the neutral agent remains
   launchctl bootout "gui/$(id -u)/com.vbusnita.grok-build-usage" 2>/dev/null || true
   rm -f "${HOME}/Library/LaunchAgents/com.vbusnita.grok-build-usage.plist"
-  # Launch via `open -ga` so Launch Services attributes the process to the
-  # .app bundle (display name "Grok Build Usage") rather than a bare path to
-  # the embedded Python runtime.
+  # Launch the in-bundle launcher directly (not `open -ga`). Launch Services
+  # attribution to the .app bundle can put the NSStatusItem under a different
+  # Control Center identity than the sticky "python3.11" allow-list row, so the
+  # menu bar button never gets a frame. Direct exec matches that allow entry.
   cat > "${LAUNCH_AGENT_PLIST}" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -324,9 +313,7 @@ if [[ "${DO_LOGIN}" -eq 1 ]]; then
   <string>${BUNDLE_ID}</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/usr/bin/open</string>
-    <string>-ga</string>
-    <string>${APP_DIR}</string>
+    <string>${APP_DIR}/Contents/MacOS/gbu</string>
   </array>
   <key>RunAtLoad</key>
   <true/>

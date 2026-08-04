@@ -48,23 +48,24 @@ class GrokBuildUsageApp(rumps.App):
         self._fetching = False
         self._lock = threading.Lock()
         self._status_checks = 0
-
-        self._hud = UsageHUD.alloc().init()
-        self._hud_visible = start_hud_visible
-        if start_hud_visible:
-            self._hud.show()
-        else:
-            self._hud.hide()
+        self._want_hud = start_hud_visible
+        self._hud_shown_once = False
+        self._status_slowed = False
+        # Lazily construct the floating HUD only after the status item is
+        # healthy. Creating/showing an NSPanel during status-item layout
+        # leaves the menu-bar button at height 0 permanently on recent macOS.
+        self._hud: Optional[UsageHUD] = None
+        self._hud_visible = False
 
         self.menu = [
-            rumps.MenuItem("Hide Overlay", callback=self._toggle_overlay),
+            rumps.MenuItem("Show Overlay", callback=self._toggle_overlay),
             rumps.MenuItem("Refresh Now", callback=self._refresh_now),
             None,
             rumps.MenuItem("Open Grok Usage…", callback=self._open_usage_page),
             None,
             rumps.MenuItem("Quit", callback=self._quit),
         ]
-        self._toggle_item = self.menu["Hide Overlay"]
+        self._toggle_item = self.menu["Show Overlay"]
 
         # Apply UI updates + kick background polls on the main thread.
         self._ui_timer = rumps.Timer(self._on_tick, 0.5)
@@ -82,10 +83,27 @@ class GrokBuildUsageApp(rumps.App):
     # Menu actions
     # ------------------------------------------------------------------
 
+    def _ensure_hud(self) -> UsageHUD:
+        if self._hud is None:
+            self._hud = UsageHUD.alloc().init()
+            self._hud.hide()
+        return self._hud
+
     def _toggle_overlay(self, _sender=None):
-        visible = self._hud.toggle()
-        self._hud_visible = visible
-        self._toggle_item.title = "Hide Overlay" if visible else "Show Overlay"
+        hud = self._ensure_hud()
+        if not self._hud_visible:
+            hud.show()
+            self._hud_visible = True
+            self._want_hud = True
+            self._hud_shown_once = True
+            self._toggle_item.title = "Hide Overlay"
+            if self._snapshot is not None:
+                hud.update_snapshot(self._snapshot)
+        else:
+            hud.hide()
+            self._hud_visible = False
+            self._want_hud = False
+            self._toggle_item.title = "Show Overlay"
 
     def _refresh_now(self, _sender=None):
         self._kick_fetch(force=True)
@@ -98,7 +116,8 @@ class GrokBuildUsageApp(rumps.App):
 
     def _quit(self, _sender=None):
         try:
-            self._hud.hide()
+            if self._hud is not None:
+                self._hud.hide()
         except Exception:
             pass
         rumps.quit_application()
@@ -237,18 +256,40 @@ class GrokBuildUsageApp(rumps.App):
         except Exception:
             log.exception("status item recreate failed")
 
+    def _reveal_hud_if_wanted(self) -> None:
+        """Show deferred floating overlay once the status item is stable."""
+        if self._hud_shown_once or not self._want_hud:
+            return
+        self._hud_shown_once = True
+        try:
+            hud = self._ensure_hud()
+            hud.show()
+            self._hud_visible = True
+            self._toggle_item.title = "Hide Overlay"
+            if self._snapshot is not None:
+                hud.update_snapshot(self._snapshot)
+            log.info("HUD shown after status item became healthy")
+        except Exception:
+            log.exception("deferred HUD show failed")
+
     def _on_status_watch(self, _sender):
         # Status item is created inside App.run() after __init__; wait for it.
-        if self._status_item() is None:
+        item = self._status_item()
+        if item is None:
             return
 
         self._status_checks += 1
+        try:
+            item.setVisible_(True)
+        except Exception:
+            pass
         self._apply_status_appearance(self._title or DEFAULT_TITLE)
 
         healthy = self._status_frame_healthy()
         # AppKit often reports height=0 for the first couple of ticks while the
-        # status window is laid out — wait before tearing it down.
-        if not healthy and self._status_checks in (10, 16, 24):
+        # status window is laid out — wait before tearing it down. Avoid
+        # thrashing: one recreate only, late enough for multi-monitor layout.
+        if not healthy and self._status_checks == 16:
             log.warning(
                 "status item unhealthy (check %s) — recreating",
                 self._status_checks,
@@ -270,14 +311,18 @@ class GrokBuildUsageApp(rumps.App):
             except Exception:
                 pass
 
-        # After a few successful healthy checks, slow down (reuse poll timer cadence).
-        if healthy and self._status_checks >= 6:
-            try:
-                self._status_timer.stop()
-            except Exception:
-                pass
-            self._status_timer = rumps.Timer(self._on_status_watch, 30.0)
-            self._status_timer.start()
+        # After a few successful healthy checks, reveal deferred HUD and slow
+        # the watch timer (once).
+        if healthy and self._status_checks >= 3:
+            self._reveal_hud_if_wanted()
+            if not self._status_slowed:
+                self._status_slowed = True
+                try:
+                    self._status_timer.stop()
+                except Exception:
+                    pass
+                self._status_timer = rumps.Timer(self._on_status_watch, 30.0)
+                self._status_timer.start()
 
     # ------------------------------------------------------------------
     # Polling
@@ -298,10 +343,11 @@ class GrokBuildUsageApp(rumps.App):
         title = pending.menu_title()
         self.title = title
         self._apply_status_appearance(title)
-        try:
-            self._hud.update_snapshot(pending)
-        except Exception:
-            log.exception("HUD update failed")
+        if self._hud is not None:
+            try:
+                self._hud.update_snapshot(pending)
+            except Exception:
+                log.exception("HUD update failed")
 
     def _kick_fetch(self, force: bool = False):
         with self._lock:

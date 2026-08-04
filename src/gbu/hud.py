@@ -25,9 +25,9 @@ from AppKit import (
     NSImageView,
     NSKernAttributeName,
     NSPanel,
+    NSFloatingWindowLevel,
     NSShadow,
     NSShadowAttributeName,
-    NSStatusWindowLevel,
     NSTextField,
     NSView,
     NSWindowCollectionBehaviorCanJoinAllSpaces,
@@ -237,7 +237,11 @@ class UsageHUD(NSObject):
             NSBackingStoreBuffered,
             False,
         )
-        self._panel.setLevel_(NSStatusWindowLevel)
+        # Must NOT use NSStatusWindowLevel: a full-width HUD at status-bar
+        # level competes with NSStatusItem layout and leaves the menu-bar
+        # button at height 0 forever (seen on macOS 15+). Floating is enough
+        # for an always-on-top glanceable overlay.
+        self._panel.setLevel_(NSFloatingWindowLevel)
         self._panel.setOpaque_(False)
         self._panel.setBackgroundColor_(NSColor.clearColor())
         self._panel.setHasShadow_(False)  # text carries its own shadow
