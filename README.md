@@ -44,7 +44,9 @@ Then look for the chart icon + **`GBU · …%`** in the menu bar. Use **Hide / S
 
 **Stays until you Quit:** the LaunchAgent restarts the process if it crashes (non-zero exit). **Quit** from the menu bar exits cleanly (exit 0) and does **not** auto-restart until the next login or you open the app again. The menu-bar item also self-heals if macOS parks it (sleep/wake, display changes); if repair fails repeatedly it restarts itself.
 
-**Menu Bar allow-list:** on macOS that already ran an early install, the toggle is often still labeled **python3.11**. Keep that **ON** — it is this app. Prefer starting via the LaunchAgent / `./scripts/install-app.sh --login` (direct launcher). Double-clicking the `.app` can attribute the status item under a different identity that never appears in Settings.
+**Re-open after Quit:** double-click **`~/Applications/Grok Build Usage.app`** (or Spotlight). The launcher re-dispatches through the LaunchAgent — do not expect a Dock icon (agent app). Install with `--login` so reopen always works.
+
+**Menu Bar allow-list:** on macOS that already ran an early install, the toggle is often still labeled **python3.11**. Keep that **ON** — it is this app.
 ### Without login-at-start
 
 ```bash
