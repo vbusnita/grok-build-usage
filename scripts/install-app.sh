@@ -258,84 +258,56 @@ EOF
 
 echo "APPL????" > "${APP_DIR}/Contents/PkgInfo"
 
-# Optional simple icon via SF Symbol → PNG → icns (best-effort)
-ICONSET="${APP_DIR}/Contents/Resources/AppIcon.iconset"
-if "${PYTHON_BIN}" - <<'PY' "${ICONSET}" 2>/dev/null
-import sys
-from pathlib import Path
-from AppKit import (
-    NSApplication,
-    NSBitmapImageRep,
-    NSColor,
-    NSImage,
-    NSImageSymbolConfiguration,
-    NSFontWeightMedium,
-    NSImageScaleProportionallyUpOrDown,
-)
+# App icon + menu-bar template from packaged assets (usage-bars mark)
+ASSETS_DIR="${PROJECT_DIR}/src/gbu/assets"
+RESOURCES_DIR="${APP_DIR}/Contents/Resources"
+mkdir -p "${RESOURCES_DIR}"
 
-NSApplication.sharedApplication()
-out = Path(sys.argv[1])
-out.mkdir(parents=True, exist_ok=True)
-
-def make_png(size: int, path: Path) -> None:
-    img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
-        "wrench.and.screwdriver", None
-    )
-    if img is None:
-        return
-    cfg = NSImageSymbolConfiguration.configurationWithPointSize_weight_scale_(
-        size * 0.55, NSFontWeightMedium, 1
-    )
-    img = img.imageWithSymbolConfiguration_(cfg) or img
-    canvas = NSImage.alloc().initWithSize_((size, size))
-    canvas.lockFocus()
-    NSColor.colorWithCalibratedRed_green_blue_alpha_(0.07, 0.07, 0.09, 1.0).set()
-    from AppKit import NSBezierPath, NSMakeRect
-    NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
-        NSMakeRect(0, 0, size, size), size * 0.22, size * 0.22
-    ).fill()
-    # zinc glyph
-    tinted = img.copy()
-    tinted.setTemplate_(True)
-    margin = size * 0.18
-    tinted.drawInRect_fromRect_operation_fraction_(
-        NSMakeRect(margin, margin, size - 2 * margin, size - 2 * margin),
-        NSMakeRect(0, 0, 0, 0),
-        2,  # NSCompositingOperationSourceOver
-        1.0,
-    )
-    canvas.unlockFocus()
-    tiff = canvas.TIFFRepresentation()
-    rep = NSBitmapImageRep.imageRepWithData_(tiff)
-    png = rep.representationUsingType_properties_(4, None)  # NSPNGFileType
-    path.write_bytes(bytes(png))
-
-for s, name in [
-    (16, "icon_16x16.png"),
-    (32, "diana.k@example.org"),
-    (32, "icon_32x32.png"),
-    (64, "ivan.p@example.net"),
-    (128, "icon_128x128.png"),
-    (256, "wendy.h@example.net"),
-    (256, "icon_256x256.png"),
-    (512, "wendy.h@example.net"),
-    (512, "icon_512x512.png"),
-    (1024, "walt.e@example.net"),
-]:
-    make_png(s, out / name)
-print("ok")
-PY
-then
-  if command -v iconutil >/dev/null 2>&1; then
-    iconutil -c icns "${ICONSET}" -o "${APP_DIR}/Contents/Resources/AppIcon.icns" 2>/dev/null || true
-    rm -rf "${ICONSET}"
-    if [[ -f "${APP_DIR}/Contents/Resources/AppIcon.icns" ]]; then
-      /usr/libexec/PlistBuddy -c 'Add :CFBundleIconFile string AppIcon' \
-        "${APP_DIR}/Contents/Info.plist" 2>/dev/null \
-        || /usr/libexec/PlistBuddy -c 'Set :CFBundleIconFile AppIcon' \
-        "${APP_DIR}/Contents/Info.plist" 2>/dev/null || true
-    fi
+# Copy monochrome menu-bar templates into the bundle (template = system-tinted)
+for f in MenuBarTemplate.png "MenuBarTemplate@2x.png"; do
+  if [[ -f "${ASSETS_DIR}/${f}" ]]; then
+    cp -f "${ASSETS_DIR}/${f}" "${RESOURCES_DIR}/${f}"
   fi
+done
+
+ICONSET="${RESOURCES_DIR}/AppIcon.iconset"
+APPICON_MASTER="${ASSETS_DIR}/AppIcon.png"
+if [[ -f "${APPICON_MASTER}" ]] && command -v iconutil >/dev/null 2>&1 && command -v sips >/dev/null 2>&1; then
+  echo "==> Building AppIcon.icns from assets/AppIcon.png"
+  rm -rf "${ICONSET}"
+  mkdir -p "${ICONSET}"
+  # Full-bleed master → every iconset size (Finder / Spotlight / Get Info).
+  # sips is system-provided (no Pillow). Write via a temp *.png path first —
+  # sips mishandles @2x filenames when used as --out directly.
+  while IFS=' ' read -r size name; do
+    tmp="$(mktemp -t gbu-icon).png"
+    sips -z "${size}" "${size}" "${APPICON_MASTER}" --out "${tmp}" >/dev/null
+    mv -f "${tmp}" "${ICONSET}/${name}"
+  done <<'SIZES'
+16 icon_16x16.png
+32 diana.k@example.org
+32 icon_32x32.png
+64 ivan.p@example.net
+128 icon_128x128.png
+256 wendy.h@example.net
+256 icon_256x256.png
+512 wendy.h@example.net
+512 icon_512x512.png
+1024 walt.e@example.net
+SIZES
+  if iconutil -c icns "${ICONSET}" -o "${RESOURCES_DIR}/AppIcon.icns"; then
+    rm -rf "${ICONSET}"
+    /usr/libexec/PlistBuddy -c 'Add :CFBundleIconFile string AppIcon' \
+      "${APP_DIR}/Contents/Info.plist" 2>/dev/null \
+      || /usr/libexec/PlistBuddy -c 'Set :CFBundleIconFile AppIcon' \
+      "${APP_DIR}/Contents/Info.plist" 2>/dev/null || true
+    cp -f "${APPICON_MASTER}" "${RESOURCES_DIR}/AppIcon.png"
+  else
+    echo "warning: iconutil failed — AppIcon.icns not built" >&2
+    rm -rf "${ICONSET}"
+  fi
+else
+  echo "warning: assets/AppIcon.png, sips, or iconutil missing — no custom Finder icon" >&2
 fi
 
 # Clear quarantine if present (downloaded / script-built apps)

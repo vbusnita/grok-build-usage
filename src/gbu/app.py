@@ -27,6 +27,7 @@ import sys
 import threading
 import time
 import webbrowser
+from pathlib import Path
 from typing import Optional
 
 import rumps
@@ -40,8 +41,11 @@ log = logging.getLogger(__name__)
 POLL_SECONDS = 45
 USAGE_URL = "https://grok.com/?_s=usage"
 DEFAULT_TITLE = "GBU"
-# SF Symbol — template so it inverts correctly in light/dark menu bars
+# SF Symbol fallback — template so it inverts correctly in light/dark menu bars
 STATUS_SYMBOL = "chart.bar.fill"
+# Custom three-bar mark (matches AppIcon); loaded as a template image.
+_MENUBAR_TEMPLATE_NAMES = ("MenuBarTemplate.png", "MenuBarTemplate@2x.png")
+_STATUS_IMAGE_PT = 18.0
 
 # Status-item health watch
 STATUS_WATCH_FAST_S = 0.75
@@ -173,8 +177,83 @@ class GrokBuildUsageApp(rumps.App):
         except Exception:
             return None
 
+    def _menubar_template_candidates(self) -> list[Path]:
+        """Resolve custom three-bar glyph paths (bundle Resources, then package)."""
+        found: list[Path] = []
+        seen: set[str] = set()
+
+        def _add(path: Path) -> None:
+            key = str(path)
+            if key not in seen and path.is_file():
+                seen.add(key)
+                found.append(path)
+
+        roots: list[Path] = []
+
+        # 1) Walk up from the running executable → …/Foo.app/Contents/Resources
+        #    (embedded Python's mainBundle is often the interpreter, not our .app)
+        try:
+            exe = Path(sys.executable).resolve()
+            for parent in exe.parents:
+                if parent.name == "MacOS":
+                    res = parent.parent / "Resources"
+                    if res.is_dir():
+                        roots.append(res)
+                    break
+        except Exception:
+            pass
+
+        # 2) NSBundle mainBundle Resources (works for true app-native binaries)
+        try:
+            from Foundation import NSBundle
+
+            res = NSBundle.mainBundle().resourcePath()
+            if res:
+                roots.append(Path(res))
+        except Exception:
+            pass
+
+        # 3) Package assets (editable install / python -m gbu)
+        roots.append(Path(__file__).resolve().parent / "assets")
+
+        for root in roots:
+            for name in _MENUBAR_TEMPLATE_NAMES:
+                _add(root / name)
+
+        return found
+
+    def _status_template_image(self):
+        """Monochrome template image for the status item (system-tinted).
+
+        Prefers the custom usage-bars glyph; falls back to SF Symbol
+        ``chart.bar.fill`` so a missing asset never blanks the menu bar.
+        """
+        from AppKit import NSImage
+
+        # Prefer @2x file when present — set point size so AppKit scales crisply.
+        paths = self._menubar_template_candidates()
+        path_2x = next((p for p in paths if p.name.endswith("@2x.png")), None)
+        path_1x = next((p for p in paths if not p.name.endswith("@2x.png")), None)
+        pick = path_2x or path_1x
+        if pick is not None:
+            try:
+                img = NSImage.alloc().initWithContentsOfFile_(str(pick))
+                if img is not None:
+                    img.setSize_((_STATUS_IMAGE_PT, _STATUS_IMAGE_PT))
+                    img.setTemplate_(True)
+                    return img
+            except Exception:
+                log.exception("failed loading menu bar template from %s", pick)
+
+        img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
+            STATUS_SYMBOL, "Grok Build Usage"
+        )
+        if img is not None:
+            img.setTemplate_(True)
+        return img
+
     def _apply_status_appearance(self, title: Optional[str] = None) -> bool:
-        """Push title + template SF Symbol through NSStatusBarButton.
+        """Push title + template glyph through NSStatusBarButton.
 
         Returns True if a button was available and updated.
         """
@@ -192,13 +271,10 @@ class GrokBuildUsageApp(rumps.App):
             log.exception("status button setTitle failed")
 
         try:
-            from AppKit import NSImage, NSImageLeft
+            from AppKit import NSImageLeft
 
-            img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
-                STATUS_SYMBOL, "Grok Build Usage"
-            )
+            img = self._status_template_image()
             if img is not None:
-                img.setTemplate_(True)
                 btn.setImage_(img)
                 try:
                     btn.setImagePosition_(NSImageLeft)
