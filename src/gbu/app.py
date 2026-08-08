@@ -10,13 +10,22 @@ Status-item notes (macOS 14+ / 26):
   On newer systems the painted surface is NSStatusBarButton — we always
   push title/icon through button() and repair the item if AppKit parks
   its window off-screen (a real failure mode we hit in the wild).
+
+Persistence:
+  The icon must stay visible until the user chooses Quit. AppKit can still
+  park the status item (sleep/wake, display changes, menu-bar overflow).
+  We continuously self-heal; if repair fails repeatedly we exit non-zero so
+  the LaunchAgent (KeepAlive SuccessfulExit=false) restarts us. Menu Quit
+  exits 0 so launchd does not bring us back.
 """
 
 from __future__ import annotations
 
 import logging
 import subprocess
+import sys
 import threading
+import time
 import webbrowser
 from typing import Optional
 
@@ -33,6 +42,18 @@ USAGE_URL = "https://grok.com/?_s=usage"
 DEFAULT_TITLE = "GBU"
 # SF Symbol — template so it inverts correctly in light/dark menu bars
 STATUS_SYMBOL = "chart.bar.fill"
+
+# Status-item health watch
+STATUS_WATCH_FAST_S = 0.75
+STATUS_WATCH_SLOW_S = 15.0
+# Grace period after launch / recreate before we tear the item down again.
+STATUS_RECREATE_GRACE_S = 8.0
+# Min spacing between recreate attempts (avoid thrashing AppKit).
+STATUS_RECREATE_COOLDOWN_S = 20.0
+# Consecutive unhealthy ticks (at current watch interval) before recreate.
+STATUS_UNHEALTHY_BEFORE_RECREATE = 3
+# After this many failed heal cycles in a row, exit non-zero → LaunchAgent restart.
+STATUS_MAX_FAILED_HEALS = 4
 
 
 class GrokBuildUsageApp(rumps.App):
@@ -51,6 +72,12 @@ class GrokBuildUsageApp(rumps.App):
         self._want_hud = start_hud_visible
         self._hud_shown_once = False
         self._status_slowed = False
+        self._ever_healthy = False
+        self._unhealthy_streak = 0
+        self._failed_heals = 0
+        self._last_recreate_at = 0.0
+        self._started_at = time.monotonic()
+        self._user_quit = False
         # Lazily construct the floating HUD only after the status item is
         # healthy. Creating/showing an NSPanel during status-item layout
         # leaves the menu-bar button at height 0 permanently on recent macOS.
@@ -73,8 +100,9 @@ class GrokBuildUsageApp(rumps.App):
         self._poll_timer = rumps.Timer(self._on_poll, max(5.0, float(poll_seconds)))
         self._poll_timer.start()
         # Status item only exists after app.run(); fix appearance once it does.
-        self._status_timer = rumps.Timer(self._on_status_watch, 0.75)
+        self._status_timer = rumps.Timer(self._on_status_watch, STATUS_WATCH_FAST_S)
         self._status_timer.start()
+        self._install_system_observers()
 
         # Immediate first fetch
         self._kick_fetch()
@@ -115,6 +143,10 @@ class GrokBuildUsageApp(rumps.App):
             subprocess.run(["open", USAGE_URL], check=False)
 
     def _quit(self, _sender=None):
+        # Mark intentional quit so KeepAlive (SuccessfulExit=false) does not
+        # relaunch us. NSApplication.terminate_ exits 0.
+        self._user_quit = True
+        log.info("user quit from menu bar — exiting cleanly (no auto-restart)")
         try:
             if self._hud is not None:
                 self._hud.hide()
@@ -123,7 +155,7 @@ class GrokBuildUsageApp(rumps.App):
         rumps.quit_application()
 
     # ------------------------------------------------------------------
-    # Status item (menu bar) — modern button API + self-heal
+    # Status item (menu bar) — modern button API + continuous self-heal
     # ------------------------------------------------------------------
 
     def _status_item(self):
@@ -209,7 +241,7 @@ class GrokBuildUsageApp(rumps.App):
 
             screen = NSScreen.mainScreen()
             if screen is None:
-                return frame.size.height > 0 and frame.origin.x >= 0
+                return float(frame.size.height) >= 20.0 and float(frame.origin.x) >= -1.0
 
             sh = float(screen.frame().size.height)
             # Healthy: non-zero height, x on-screen, y in upper half (menu bar).
@@ -222,21 +254,93 @@ class GrokBuildUsageApp(rumps.App):
             log.exception("status frame check failed")
             return False
 
-    def _recreate_status_item(self) -> None:
-        """Tear down and re-create the NSStatusItem (recovers off-screen parking)."""
+    def _set_status_watch_interval(self, interval: float, *, slowed: bool) -> None:
+        """Replace the status watch timer interval (must run on main thread)."""
+        if self._status_slowed == slowed:
+            return
+        try:
+            self._status_timer.stop()
+        except Exception:
+            pass
+        self._status_timer = rumps.Timer(self._on_status_watch, interval)
+        self._status_timer.start()
+        self._status_slowed = slowed
+
+    def _install_system_observers(self) -> None:
+        """Re-check / repair after sleep and display topology changes."""
+        try:
+            from AppKit import NSWorkspace
+            from Foundation import NSNotificationCenter, NSObject
+            from PyObjCTools import AppHelper
+
+            app = self
+
+            class _GBUObservers(NSObject):
+                def workspaceDidWake_(self, _note):
+                    log.info("system wake — scheduling status repair")
+                    AppHelper.callAfter(app._on_system_layout_change)
+
+                def screenParametersChanged_(self, _note):
+                    log.info("screen parameters changed — scheduling status repair")
+                    AppHelper.callAfter(app._on_system_layout_change)
+
+            self._observer_proxy = _GBUObservers.alloc().init()
+            wsnc = NSWorkspace.sharedWorkspace().notificationCenter()
+            wsnc.addObserver_selector_name_object_(
+                self._observer_proxy,
+                "workspaceDidWake:",
+                "NSWorkspaceDidWakeNotification",
+                None,
+            )
+            NSNotificationCenter.defaultCenter().addObserver_selector_name_object_(
+                self._observer_proxy,
+                "screenParametersChanged:",
+                "NSApplicationDidChangeScreenParametersNotification",
+                None,
+            )
+            log.info("installed wake + screen observers for status self-heal")
+        except Exception:
+            log.exception("failed to install system observers")
+
+    def _on_system_layout_change(self) -> None:
+        """Force a fast re-check after sleep/display change (main thread)."""
+        if self._user_quit:
+            return
+        self._unhealthy_streak = STATUS_UNHEALTHY_BEFORE_RECREATE  # act soon
+        self._set_status_watch_interval(STATUS_WATCH_FAST_S, slowed=False)
+        # Give AppKit a beat to re-layout the menu bar, then heal if needed.
+        try:
+            from PyObjCTools import AppHelper
+
+            AppHelper.callLater(1.5, self._heal_if_unhealthy)
+        except Exception:
+            self._heal_if_unhealthy()
+
+    def _heal_if_unhealthy(self) -> None:
+        if self._user_quit:
+            return
+        if self._status_frame_healthy():
+            self._unhealthy_streak = 0
+            return
+        log.warning("status item unhealthy after layout change — recreating")
+        self._recreate_status_item()
+
+    def _recreate_status_item(self) -> bool:
+        """Tear down and re-create the NSStatusItem. Returns True if created."""
         nsapp = getattr(self, "_nsapp", None)
         old = self._status_item()
-        if nsapp is None or old is None:
-            return
+        if nsapp is None:
+            return False
         try:
             from AppKit import NSStatusBar, NSVariableStatusItemLength
 
             bar = NSStatusBar.systemStatusBar()
-            menu = old.menu()
-            try:
-                bar.removeStatusItem_(old)
-            except Exception:
-                log.exception("removeStatusItem failed")
+            menu = old.menu() if old is not None else None
+            if old is not None:
+                try:
+                    bar.removeStatusItem_(old)
+                except Exception:
+                    log.exception("removeStatusItem failed")
 
             try:
                 length = NSVariableStatusItemLength
@@ -250,11 +354,45 @@ class GrokBuildUsageApp(rumps.App):
                 pass
             if menu is not None:
                 new.setMenu_(menu)
+            else:
+                # rumps keeps the NSMenu on the App; re-bind if needed.
+                try:
+                    if getattr(nsapp, "_menu", None) is not None:
+                        new.setMenu_(nsapp._menu)
+                except Exception:
+                    pass
+            try:
+                new.setVisible_(True)
+            except Exception:
+                pass
             nsapp.nsstatusitem = new
+            self._last_recreate_at = time.monotonic()
+            self._unhealthy_streak = 0
             self._apply_status_appearance(self._title or DEFAULT_TITLE)
             log.warning("recreated status item (was unhealthy)")
+            return True
         except Exception:
             log.exception("status item recreate failed")
+            return False
+
+    def _escalate_restart(self, reason: str) -> None:
+        """Exit non-zero so LaunchAgent KeepAlive restarts the process.
+
+        Menu Quit uses exit 0 and must never call this.
+        """
+        if self._user_quit:
+            return
+        log.error(
+            "status item unrecoverable (%s) — exiting 1 for LaunchAgent restart",
+            reason,
+        )
+        try:
+            if self._hud is not None:
+                self._hud.hide()
+        except Exception:
+            pass
+        # Hard exit: avoid AppKit terminate_ (exit 0) so KeepAlive fires.
+        sys.exit(1)
 
     def _reveal_hud_if_wanted(self) -> None:
         """Show deferred floating overlay once the status item is stable."""
@@ -273,9 +411,13 @@ class GrokBuildUsageApp(rumps.App):
             log.exception("deferred HUD show failed")
 
     def _on_status_watch(self, _sender):
+        if self._user_quit:
+            return
+
         # Status item is created inside App.run() after __init__; wait for it.
         item = self._status_item()
         if item is None:
+            # rumps has not wired the item yet — keep waiting on fast timer.
             return
 
         self._status_checks += 1
@@ -286,43 +428,85 @@ class GrokBuildUsageApp(rumps.App):
         self._apply_status_appearance(self._title or DEFAULT_TITLE)
 
         healthy = self._status_frame_healthy()
-        # AppKit often reports height=0 for the first couple of ticks while the
-        # status window is laid out — wait before tearing it down. Avoid
-        # thrashing: one recreate only, late enough for multi-monitor layout.
-        if not healthy and self._status_checks == 16:
-            log.warning(
-                "status item unhealthy (check %s) — recreating",
-                self._status_checks,
-            )
-            self._recreate_status_item()
-            healthy = self._status_frame_healthy()
+        now = time.monotonic()
+        in_grace = (now - self._started_at) < STATUS_RECREATE_GRACE_S or (
+            self._last_recreate_at > 0
+            and (now - self._last_recreate_at) < STATUS_RECREATE_GRACE_S
+        )
 
-        if self._status_checks <= 6 or self._status_checks % 40 == 0:
+        if healthy:
+            if not self._ever_healthy:
+                log.info("status item healthy for the first time")
+            self._ever_healthy = True
+            self._unhealthy_streak = 0
+            self._failed_heals = 0
+            self._reveal_hud_if_wanted()
+            self._set_status_watch_interval(STATUS_WATCH_SLOW_S, slowed=True)
+        else:
+            self._unhealthy_streak += 1
+            # While broken, poll fast so we recover quickly after wake/layout.
+            self._set_status_watch_interval(STATUS_WATCH_FAST_S, slowed=False)
+
+            cooldown_ok = (
+                self._last_recreate_at == 0.0
+                or (now - self._last_recreate_at) >= STATUS_RECREATE_COOLDOWN_S
+            )
+            can_recreate = (
+                not in_grace
+                and self._unhealthy_streak >= STATUS_UNHEALTHY_BEFORE_RECREATE
+                and cooldown_ok
+            )
+            if can_recreate:
+                # A prior recreate that never restored health counts as a failed heal.
+                if self._last_recreate_at > 0:
+                    self._failed_heals += 1
+                    log.warning(
+                        "previous status heal did not stick (failed_heals=%s)",
+                        self._failed_heals,
+                    )
+                    if self._failed_heals >= STATUS_MAX_FAILED_HEALS:
+                        self._escalate_restart(
+                            f"{self._failed_heals} failed status-item heal cycles"
+                        )
+                        return
+
+                log.warning(
+                    "status item unhealthy (check %s, streak %s) — recreating",
+                    self._status_checks,
+                    self._unhealthy_streak,
+                )
+                if not self._recreate_status_item():
+                    self._failed_heals += 1
+                    if self._failed_heals >= STATUS_MAX_FAILED_HEALS:
+                        self._escalate_restart(
+                            f"{self._failed_heals} failed status-item heal cycles"
+                        )
+                        return
+
+        # Sparse logging: first few ticks, transitions, and occasional heartbeat.
+        log_this = (
+            self._status_checks <= 6
+            or self._status_checks % 40 == 0
+            or (
+                not healthy
+                and self._unhealthy_streak in (1, STATUS_UNHEALTHY_BEFORE_RECREATE)
+            )
+        )
+        if log_this:
             btn = self._status_button()
             try:
                 win = btn.window() if btn is not None else None
                 log.info(
-                    "status watch #%s healthy=%s title=%r frame=%s",
+                    "status watch #%s healthy=%s title=%r streak=%s failed_heals=%s frame=%s",
                     self._status_checks,
                     healthy,
                     self._title,
+                    self._unhealthy_streak,
+                    self._failed_heals,
                     win.frame() if win is not None else None,
                 )
             except Exception:
                 pass
-
-        # After a few successful healthy checks, reveal deferred HUD and slow
-        # the watch timer (once).
-        if healthy and self._status_checks >= 3:
-            self._reveal_hud_if_wanted()
-            if not self._status_slowed:
-                self._status_slowed = True
-                try:
-                    self._status_timer.stop()
-                except Exception:
-                    pass
-                self._status_timer = rumps.Timer(self._on_status_watch, 30.0)
-                self._status_timer.start()
 
     # ------------------------------------------------------------------
     # Polling

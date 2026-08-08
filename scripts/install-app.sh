@@ -143,7 +143,8 @@ if [[ ! -x "\${RUNTIME}" ]]; then
   exit 1
 fi
 
-# Single-instance: match the in-bundle runtime only
+# Single-instance: match the in-bundle runtime only.
+# Exit 0 so LaunchAgent KeepAlive (SuccessfulExit=false) does not thrash.
 if pgrep -f "\${RUNTIME} -m gbu" >/dev/null 2>&1; then
   osascript -e 'display notification "Already running — look for the chart icon + GBU · % in the menu bar" with title "Grok Build Usage"' 2>/dev/null || true
   exit 0
@@ -154,6 +155,15 @@ export PYTHONPATH
 export PYTHONUNBUFFERED=1
 export VIRTUAL_ENV="\${PROJECT_DIR}/.venv"
 cd "\${PROJECT_DIR}"
+
+# Rotate log if it gets huge (status-watch spam from older builds).
+if [[ -f "\${LOG_FILE}" ]]; then
+  log_size="\$(wc -c <"\${LOG_FILE}" | tr -d ' ')"
+  if [[ "\${log_size}" -gt 5000000 ]]; then
+    mv "\${LOG_FILE}" "\${LOG_FILE}.1" 2>/dev/null || true
+  fi
+fi
+
 exec >>"\${LOG_FILE}" 2>&1
 echo "---- \$(date -u +%Y-%m-%dT%H:%M:%SZ) start ----"
 echo "runtime=\${RUNTIME} (bundle-attributed process name)"
@@ -317,8 +327,14 @@ if [[ "${DO_LOGIN}" -eq 1 ]]; then
   </array>
   <key>RunAtLoad</key>
   <true/>
+  <!-- Restart only on crash / non-zero exit. Menu-bar Quit exits 0 → stay quit. -->
   <key>KeepAlive</key>
-  <false/>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
   <key>ProcessType</key>
   <string>Interactive</string>
   <key>StandardOutPath</key>
