@@ -35,12 +35,13 @@ cd grok-build-usage
 That will:
 
 1. Create a local `.venv` and install this package  
-2. Build **`~/Applications/Grok Build Usage.app`** (menu-bar agent — **no Dock icon**)  
-3. Embed a named Python runtime inside the app so System Settings → Desktop & Dock → **Allow in the Menu Bar** lists **Grok Build Usage** (not `python3.11`)  
-4. Register a **LaunchAgent** so it starts at login (`--login`)  
-5. Launch it (`--open`)
+2. Build **`~/Applications/Grok Build Usage.app`** (menu-bar agent — **no Dock icon**; Finder shows the usage-bars app icon)  
+3. Bundle the monochrome three-bar menu-bar glyph + `AppIcon.icns` from `src/gbu/assets/`  
+4. Embed a named Python runtime inside the app (System Settings may still list a sticky **python3.11** allow-list row from early installs — keep it **ON**)  
+5. Register a **LaunchAgent** so it starts at login (`--login`)  
+6. Launch it (`--open`)
 
-Then look for the chart icon + **`GBU · …%`** in the menu bar. Use **Hide / Show Overlay**, **Refresh Now**, **Open Grok Usage…**, or **Quit**.
+Then look for the **three-bar** glyph + **`GBU · …%`** in the menu bar. Use **Hide / Show Overlay**, **Refresh Now**, **Open Grok Usage…**, or **Quit**.
 
 **Stays until you Quit:** the LaunchAgent restarts the process if it crashes (non-zero exit). **Quit** from the menu bar exits cleanly (exit 0) and does **not** auto-restart until the next login or you open the app again. The menu-bar item also self-heals if macOS parks it (sleep/wake, display changes); if repair fails repeatedly it restarts itself.
 
@@ -49,6 +50,7 @@ Then look for the chart icon + **`GBU · …%`** in the menu bar. Use **Hide / S
 **Background activity / auth prompt:** macOS may ask once (password or Touch ID) to allow the login item. Approve **Grok Build Usage** under System Settings → General → **Login Items & Extensions** and leave it on. Opening the app again should not re-prompt; we only start the agent when it is not already running.
 
 **Menu Bar allow-list:** on macOS that already ran an early install, the toggle is often still labeled **python3.11**. Keep that **ON** — it is this app.
+
 ### Without login-at-start
 
 ```bash
@@ -61,7 +63,7 @@ Then look for the chart icon + **`GBU · …%`** in the menu bar. Use **Hide / S
 ./scripts/uninstall-app.sh
 ```
 
-(Only removes the `.app` + LaunchAgent. Your clone and Grok login stay.)
+Removes the `.app` and LaunchAgent(s) (including a legacy personal label if present). Leaves your clone, `.venv`, Grok login (`~/.grok`), and log file.
 
 ### Logs
 
@@ -113,20 +115,13 @@ src/gbu/
   billing.py    # CLI proxy billing fetch
   models.py     # UsageSnapshot
   hud.py        # floating chrome-free HUD
-  app.py        # rumps menu bar
+  app.py        # rumps menu bar + status glyph
   __main__.py   # CLI
+  assets/       # AppIcon.png + MenuBarTemplate(@2x).png
 scripts/
-  install-app.sh
-  uninstall-app.sh
+  install-app.sh    # venv, .app, icons, optional LaunchAgent
+  uninstall-app.sh  # stop agent, remove .app + LaunchAgent
 ```
-
-## Roadmap
-
-- [x] Menu bar app + LaunchAgent install script  
-- [ ] Signed / notarized `.app` release (no local clone required)  
-- [ ] Token refresh without reopening Grok Build  
-- [ ] Optional per-session token burn next to the account pool  
-- [ ] Homebrew formula / cask  
 
 ## Disclaimer
 
