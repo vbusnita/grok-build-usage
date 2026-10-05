@@ -35,6 +35,7 @@ from AppKit import (
     NSWindowStyleMaskBorderless,
     NSWindowStyleMaskNonactivatingPanel,
 )
+from CoreFoundation import CFRetain
 from Foundation import (
     NSAttributedString,
     NSDictionary,
@@ -84,6 +85,7 @@ FUEL_BAR_H = 8.0
 FUEL_DETAIL_H = 18.0
 FUEL_GAP = 20.0
 FRAME_KEY = "gbu.hudLastOrigin"
+VISIBLE_KEY = "gbu.hudVisible"
 _TOOLS_SYMBOL = "wrench.and.screwdriver"
 
 
@@ -93,15 +95,38 @@ def _ns_color(rgba: Tuple[float, float, float, float]) -> NSColor:
 
 
 _CG_CACHE: dict = {}
+_NS_COLOR_CACHE: dict = {}
 
 
 def _cg_color(rgba: Tuple[float, float, float, float]):
+    """A CGColor that stays valid for the process lifetime.
+
+    ``NSColor.CGColor()`` is an unowned pointer. Caching it and handing it to
+    ``CALayer.setBackgroundColor:`` later CFRetains a freed color and the
+    process dies with SIGTRAP. LaunchAgent then relaunches the overlay.
+    """
     key = tuple(rgba)
     cg = _CG_CACHE.get(key)
-    if cg is None:
-        cg = _ns_color(rgba).CGColor()
-        _CG_CACHE[key] = cg
+    if cg is not None:
+        return cg
+    ns = _ns_color(rgba)
+    cg = ns.CGColor()
+    CFRetain(cg)
+    _NS_COLOR_CACHE[key] = ns
+    _CG_CACHE[key] = cg
     return cg
+
+
+def saved_hud_visible() -> Optional[bool]:
+    """User's last Hide/Show choice, or None if they have not chosen yet."""
+    defaults = NSUserDefaults.standardUserDefaults()
+    if defaults.objectForKey_(VISIBLE_KEY) is None:
+        return None
+    return bool(defaults.boolForKey_(VISIBLE_KEY))
+
+
+def set_hud_visible(visible: bool) -> None:
+    NSUserDefaults.standardUserDefaults().setBool_forKey_(bool(visible), VISIBLE_KEY)
 
 
 _LABEL_STYLE: dict[int, dict] = {}
@@ -225,11 +250,13 @@ class UsageHUD(NSObject):
 
     def update_snapshot(self, snapshot: Optional[UsageSnapshot]) -> None:
         self._snapshot = snapshot
-        self._redraw()
+        if self.isVisible():
+            self._redraw()
 
     def update_fuel(self, reading: Optional[FuelReading]) -> None:
         self._fuel = reading if reading is not None else FuelReading.none()
-        self._redraw()
+        if self.isVisible():
+            self._redraw()
 
     def _redraw(self) -> None:
         if self._snapshot is None:
@@ -239,6 +266,7 @@ class UsageHUD(NSObject):
 
     def show(self) -> None:
         self._panel.orderFront_(None)
+        self._redraw()
 
     def hide(self) -> None:
         self._persist_position()
