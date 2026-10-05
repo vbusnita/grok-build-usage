@@ -36,7 +36,7 @@ import rumps
 from gbu.billing import fetch_snapshot
 from gbu.bot_usage import fetch_bot_token_total
 from gbu.fuel import FuelMeter, FuelReading, load_build_burns
-from gbu.hud import UsageHUD
+from gbu.hud import UsageHUD, saved_hud_visible, set_hud_visible
 from gbu.models import UsageSnapshot
 
 log = logging.getLogger(__name__)
@@ -81,7 +81,11 @@ class GrokBuildUsageApp(rumps.App):
         self._fetching = False
         self._lock = threading.Lock()
         self._status_checks = 0
-        self._want_hud = start_hud_visible
+        if not start_hud_visible:
+            self._want_hud = False
+        else:
+            saved = saved_hud_visible()
+            self._want_hud = True if saved is None else saved
         self._hud_shown_once = False
         self._status_slowed = False
         self._ever_healthy = False
@@ -123,6 +127,8 @@ class GrokBuildUsageApp(rumps.App):
         self._status_timer = rumps.Timer(self._on_status_watch, STATUS_WATCH_FAST_S)
         self._status_timer.start()
         self._install_system_observers()
+        if not self._want_hud:
+            log.info("overlay starts hidden")
 
         # Immediate first fetch
         self._kick_fetch()
@@ -155,6 +161,7 @@ class GrokBuildUsageApp(rumps.App):
             self._hud_visible = True
             self._want_hud = True
             self._hud_shown_once = True
+            set_hud_visible(True)
             self._toggle_item.title = "Hide Overlay"
             if self._snapshot is not None:
                 hud.update_snapshot(self._snapshot)
@@ -163,6 +170,7 @@ class GrokBuildUsageApp(rumps.App):
             hud.hide()
             self._hud_visible = False
             self._want_hud = False
+            set_hud_visible(False)
             self._toggle_item.title = "Show Overlay"
 
     def _refresh_now(self, _sender=None):
