@@ -27,18 +27,22 @@ import sys
 import threading
 import time
 import webbrowser
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 import rumps
 
 from gbu.billing import fetch_snapshot
+from gbu.bot_usage import fetch_bot_token_total
+from gbu.fuel import FuelMeter, FuelReading, load_build_burns
 from gbu.hud import UsageHUD
 from gbu.models import UsageSnapshot
 
 log = logging.getLogger(__name__)
 
 POLL_SECONDS = 45
+FUEL_SECONDS = 5.0
 USAGE_URL = "https://grok.com/?_s=usage"
 DEFAULT_TITLE = "GBU"
 # SF Symbol fallback — template so it inverts correctly in light/dark menu bars
@@ -70,6 +74,10 @@ class GrokBuildUsageApp(rumps.App):
         self.poll_seconds = poll_seconds
         self._snapshot: Optional[UsageSnapshot] = None
         self._pending: Optional[UsageSnapshot] = None
+        self._fuel = FuelReading.none()
+        self._fuel_meter = FuelMeter()
+        self._bot_daily: Optional[int] = None
+        self._fuel_at = 0.0
         self._fetching = False
         self._lock = threading.Lock()
         self._status_checks = 0
@@ -88,7 +96,15 @@ class GrokBuildUsageApp(rumps.App):
         self._hud: Optional[UsageHUD] = None
         self._hud_visible = False
 
+        self._fuel_line = rumps.MenuItem("Fuel  …", callback=self._noop)
+        self._build_line = rumps.MenuItem("SuperGrok Plus  …", callback=self._noop)
+        self._bot_line = rumps.MenuItem("Grok Bot  …", callback=self._noop)
         self.menu = [
+            self._fuel_line,
+            None,
+            self._build_line,
+            self._bot_line,
+            None,
             rumps.MenuItem("Show Overlay", callback=self._toggle_overlay),
             rumps.MenuItem("Refresh Now", callback=self._refresh_now),
             None,
@@ -121,6 +137,17 @@ class GrokBuildUsageApp(rumps.App):
             self._hud.hide()
         return self._hud
 
+    def _noop(self, _sender=None):
+        return
+
+    def _apply_menu_lines(self, snapshot: UsageSnapshot) -> None:
+        lines = snapshot.menu_lines()
+        self._build_line.title = lines[0] if lines else "Grok Build  …"
+        bot = next((line for line in lines if line.startswith("Grok Bot")), None)
+        if bot is None and snapshot.bot is not None:
+            bot = f"Grok Bot  {snapshot.bot.value_text()}"
+        self._bot_line.title = bot or "Grok Bot  …"
+
     def _toggle_overlay(self, _sender=None):
         hud = self._ensure_hud()
         if not self._hud_visible:
@@ -131,6 +158,7 @@ class GrokBuildUsageApp(rumps.App):
             self._toggle_item.title = "Hide Overlay"
             if self._snapshot is not None:
                 hud.update_snapshot(self._snapshot)
+            hud.update_fuel(self._fuel)
         else:
             hud.hide()
             self._hud_visible = False
@@ -482,6 +510,7 @@ class GrokBuildUsageApp(rumps.App):
             self._toggle_item.title = "Hide Overlay"
             if self._snapshot is not None:
                 hud.update_snapshot(self._snapshot)
+            hud.update_fuel(self._fuel)
             log.info("HUD shown after status item became healthy")
         except Exception:
             log.exception("deferred HUD show failed")
@@ -597,17 +626,49 @@ class GrokBuildUsageApp(rumps.App):
             if self._pending is not None:
                 pending = self._pending
                 self._pending = None
-        if pending is None:
+        if pending is not None:
+            self._snapshot = pending
+            title = pending.menu_title()
+            self.title = title
+            self._apply_menu_lines(pending)
+            self._apply_status_appearance(title)
+            if self._hud is not None:
+                try:
+                    self._hud.update_snapshot(pending)
+                except Exception:
+                    log.exception("HUD update failed")
+        self._refresh_fuel()
+
+    def _refresh_fuel(self) -> None:
+        now_mono = time.monotonic()
+        if now_mono - self._fuel_at < FUEL_SECONDS:
             return
-        self._snapshot = pending
-        title = pending.menu_title()
-        self.title = title
-        self._apply_status_appearance(title)
+        self._fuel_at = now_mono
+        with self._lock:
+            bot_daily = self._bot_daily
+        try:
+            reading = self._fuel_meter.observe(
+                load_build_burns(),
+                bot_daily,
+                datetime.now().astimezone(),
+                now_mono,
+            )
+        except Exception:
+            log.exception("fuel read failed")
+            return
+        changed = (
+            reading.menu_text() != self._fuel.menu_text()
+            or abs(reading.fill() - self._fuel.fill()) >= 0.02
+        )
+        self._fuel = reading
+        if not changed:
+            return
+        self._fuel_line.title = reading.menu_text()
         if self._hud is not None:
             try:
-                self._hud.update_snapshot(pending)
+                self._hud.update_fuel(reading)
             except Exception:
-                log.exception("HUD update failed")
+                log.exception("fuel HUD update failed")
 
     def _kick_fetch(self, force: bool = False):
         with self._lock:
@@ -623,8 +684,11 @@ class GrokBuildUsageApp(rumps.App):
                 from gbu.models import snapshot_from_billing
 
                 snap = snapshot_from_billing({}, error=f"Fetch failed: {type(exc).__name__}")
+            bot_daily = fetch_bot_token_total()
             with self._lock:
                 self._pending = snap
+                if bot_daily is not None:
+                    self._bot_daily = bot_daily
                 self._fetching = False
 
         threading.Thread(target=worker, name="gbu-billing", daemon=True).start()

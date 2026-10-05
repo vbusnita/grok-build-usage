@@ -45,7 +45,8 @@ from Foundation import (
     NSUserDefaults,
 )
 
-from gbu.models import UsageSnapshot
+from gbu.fuel import FuelReading
+from gbu.models import UsageSlice, UsageSnapshot
 
 log = logging.getLogger(__name__)
 
@@ -74,6 +75,14 @@ LABEL_SIZE = 13.0
 VALUE_SIZE = 18.0
 METRIC_GAP = 22.0
 METRIC_BLOCK_H = 44.0
+POOL_NAME_H = 24.0
+POOL_BAR_H = 6.0
+POOL_RESET_H = 18.0
+POOL_GAP = 18.0
+FUEL_NAME_H = 24.0
+FUEL_BAR_H = 8.0
+FUEL_DETAIL_H = 18.0
+FUEL_GAP = 20.0
 FRAME_KEY = "gbu.hudLastOrigin"
 _TOOLS_SYMBOL = "wrench.and.screwdriver"
 
@@ -160,6 +169,17 @@ def _set_text(lab: NSTextField, text: str, color=None, kern: Optional[float] = N
     )
 
 
+def _pool_block_height(footnote: bool) -> float:
+    height = POOL_NAME_H + 8 + POOL_BAR_H + 6 + POOL_RESET_H
+    if footnote:
+        height += 16
+    return height + POOL_GAP
+
+
+def _fuel_block_height() -> float:
+    return FUEL_NAME_H + 8 + FUEL_BAR_H + 6 + FUEL_DETAIL_H + FUEL_GAP
+
+
 def _tools_image(point_size: float = 18.0) -> Optional[NSImage]:
     img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
         _TOOLS_SYMBOL, "Grok Build tools"
@@ -192,6 +212,8 @@ class UsageHUD(NSObject):
             return None
         self._snapshot: Optional[UsageSnapshot] = None
         self._metric_views: List[NSView] = []
+        self._breakdown_views: List[NSView] = []
+        self._fuel = FuelReading.none()
         self._build_panel()
         self._restore_position()
         self._apply_loading()
@@ -203,10 +225,17 @@ class UsageHUD(NSObject):
 
     def update_snapshot(self, snapshot: Optional[UsageSnapshot]) -> None:
         self._snapshot = snapshot
-        if snapshot is None:
+        self._redraw()
+
+    def update_fuel(self, reading: Optional[FuelReading]) -> None:
+        self._fuel = reading if reading is not None else FuelReading.none()
+        self._redraw()
+
+    def _redraw(self) -> None:
+        if self._snapshot is None:
             self._apply_loading()
             return
-        self._apply_snapshot(snapshot)
+        self._apply_snapshot(self._snapshot)
 
     def show(self) -> None:
         self._panel.orderFront_(None)
@@ -230,7 +259,7 @@ class UsageHUD(NSObject):
     # ------------------------------------------------------------------
 
     def _build_panel(self) -> None:
-        height = self._height_for_metrics(3)
+        height = self._panel_height(3, 0.0)
         self._panel = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
             NSRect(NSPoint(40, 80), NSSize(HUD_WIDTH, height)),
             NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel,
@@ -368,17 +397,46 @@ class UsageHUD(NSObject):
         )
         content.addSubview_(self._metrics_host)
 
+        self._breakdown_host = NSView.alloc().initWithFrame_(
+            NSRect(NSPoint(0, 0), NSSize(HUD_WIDTH, 1))
+        )
+        content.addSubview_(self._breakdown_host)
+        for view in (
+            self._icon_view,
+            self._brand,
+            self._live,
+            self._track,
+            self._gauge_pct,
+            self._gauge_label,
+            self._metrics_host,
+        ):
+            view.setHidden_(True)
+
     # ------------------------------------------------------------------
     # Layout
     # ------------------------------------------------------------------
 
-    def _height_for_metrics(self, n: int) -> float:
-        header = ICON_PT + 12
-        bar = 48
-        metrics = METRIC_BLOCK_H + 8 if n > 0 else 0
-        return PAD_Y + header + bar + metrics + PAD_Y
+    def _panel_height(self, metric_n: int, breakdown_h: float) -> float:
+        # Keeps an 8pt gap between the gauge caption and the breakdown block.
+        metrics_extra = (METRIC_BLOCK_H + 8) if metric_n else 0
+        return 2 * PAD_Y + metrics_extra + breakdown_h + ICON_PT + 58
 
-    def _resize_to(self, height: float) -> None:
+    def _place_lower(self, breakdown_h: float, metric_n: int) -> None:
+        if metric_n:
+            self._metrics_host.setFrame_(
+                NSRect(NSPoint(0, PAD_Y), NSSize(HUD_WIDTH, METRIC_BLOCK_H))
+            )
+        else:
+            self._metrics_host.setFrame_(NSRect(NSPoint(0, 0), NSSize(HUD_WIDTH, 1)))
+        metrics_extra = (METRIC_BLOCK_H + 8) if metric_n else 0
+        self._breakdown_host.setFrame_(
+            NSRect(
+                NSPoint(0, PAD_Y + metrics_extra),
+                NSSize(HUD_WIDTH, max(breakdown_h, 1.0)),
+            )
+        )
+
+    def _resize_to(self, height: float, breakdown_h: float = 0.0, metric_n: int = 0) -> None:
         frame = self._panel.frame()
         new_y = frame.origin.y + (frame.size.height - height)
         self._panel.setFrame_display_(
@@ -414,6 +472,7 @@ class UsageHUD(NSObject):
         self._gauge_label.setFrame_(
             NSRect(NSPoint(track_x, track_y - 22), NSSize(240, 16))
         )
+        self._place_lower(breakdown_h, metric_n)
 
     def _set_level(self, level: str) -> None:
         if level == "error":
@@ -442,18 +501,13 @@ class UsageHUD(NSObject):
             v.removeFromSuperview()
         self._metric_views = []
 
-    def _render_metrics(self, rows: Sequence[Tuple[str, str]], height: float) -> None:
+    def _render_metrics(self, rows: Sequence[Tuple[str, str]]) -> None:
         self._clear_metrics()
         if not rows:
-            self._metrics_host.setFrame_(NSRect(NSPoint(0, 0), NSSize(HUD_WIDTH, 1)))
             return
 
         rows = list(rows)[:4]
         n = len(rows)
-        host_y = PAD_Y
-        self._metrics_host.setFrame_(
-            NSRect(NSPoint(0, host_y), NSSize(HUD_WIDTH, METRIC_BLOCK_H))
-        )
 
         # Equal columns across the width
         col_w = (HUD_WIDTH - 2 * PAD_X - METRIC_GAP * (n - 1)) / n
@@ -493,71 +547,239 @@ class UsageHUD(NSObject):
             self._metric_views.append(block)
             x += col_w + METRIC_GAP
 
+    def _level_color(self, level: str):
+        if level == "bad" or level == "error":
+            return _RED
+        if level == "warn":
+            return _YELLOW
+        return _GREEN
+
+    def _pace_color(self, level: str):
+        if level == "hard":
+            return _RED
+        if level == "steady":
+            return _YELLOW
+        if level == "easy":
+            return _GREEN
+        return _TELEM_VALUE
+
+    def _draw_fuel(self, top_edge: float) -> None:
+        """Fuel block whose top sits at top_edge. Amount is tokens; bar is pace."""
+        reading = self._fuel
+        name_y = top_edge - FUEL_NAME_H
+        label = _make_text_field(
+            PAD_X,
+            name_y,
+            HUD_WIDTH - 120,
+            FUEL_NAME_H,
+            size=18,
+            weight=NSFontWeightSemibold,
+            color=_TEXT,
+            mono=False,
+        )
+        _set_text(label, "Fuel")
+        self._track_breakdown(label)
+
+        amount_color = self._pace_color(reading.level) if reading.sources else _TEXT_MUTED
+        amount = _make_text_field(
+            HUD_WIDTH - PAD_X - 100,
+            name_y,
+            100,
+            FUEL_NAME_H,
+            size=20,
+            weight=NSFontWeightSemibold,
+            color=amount_color,
+            align="right",
+            mono=True,
+        )
+        _set_text(amount, reading.amount_text(), color=amount_color)
+        self._track_breakdown(amount)
+
+        bar_y = name_y - 8 - FUEL_BAR_H
+        self._add_pool_bar(
+            PAD_X,
+            bar_y,
+            HUD_WIDTH - 2 * PAD_X,
+            reading.fill() * 100.0,
+            amount_color,
+            bar_h=FUEL_BAR_H,
+        )
+
+        detail_y = bar_y - 6 - FUEL_DETAIL_H
+        detail = _make_text_field(
+            PAD_X,
+            detail_y,
+            HUD_WIDTH - 2 * PAD_X,
+            FUEL_DETAIL_H,
+            size=15,
+            weight=NSFontWeightRegular,
+            color=_TELEM_VALUE,
+            mono=True,
+        )
+        _set_text(detail, reading.detail_text(), color=_TELEM_VALUE)
+        self._track_breakdown(detail)
+
+    def _clear_breakdown(self) -> None:
+        for view in self._breakdown_views:
+            view.removeFromSuperview()
+        self._breakdown_views = []
+
+    def _track_breakdown(self, view: NSView) -> None:
+        self._breakdown_host.addSubview_(view)
+        self._breakdown_views.append(view)
+
+    def _fit_pools(self, height: float) -> None:
+        frame = self._panel.frame()
+        new_y = frame.origin.y + (frame.size.height - height)
+        self._panel.setFrame_display_(
+            NSRect(NSPoint(frame.origin.x, new_y), NSSize(HUD_WIDTH, height)),
+            True,
+        )
+        self._content.setFrame_(NSRect(NSPoint(0, 0), NSSize(HUD_WIDTH, height)))
+        self._breakdown_host.setFrame_(
+            NSRect(NSPoint(0, 0), NSSize(HUD_WIDTH, height))
+        )
+
+    def _add_pool_bar(
+        self,
+        x: float,
+        y: float,
+        width: float,
+        pct: Optional[float],
+        color,
+        bar_h: float = POOL_BAR_H,
+    ) -> None:
+        track = NSView.alloc().initWithFrame_(
+            NSRect(NSPoint(x, y), NSSize(width, bar_h))
+        )
+        track.setWantsLayer_(True)
+        track.layer().setCornerRadius_(bar_h / 2)
+        track.layer().setMasksToBounds_(True)
+        track.layer().setBackgroundColor_(_cg_color(_TRACK))
+        self._track_breakdown(track)
+        frac = 0.0 if pct is None else max(0.0, min(1.0, pct / 100.0))
+        fill_w = frac * width
+        if pct and fill_w < 4:
+            fill_w = 4
+        fill = NSView.alloc().initWithFrame_(
+            NSRect(NSPoint(0, 0), NSSize(fill_w, bar_h))
+        )
+        fill.setWantsLayer_(True)
+        fill.layer().setCornerRadius_(bar_h / 2)
+        fill.layer().setBackgroundColor_(_cg_color(color if pct is not None else _TRACK))
+        track.addSubview_(fill)
+
+    def _render_pools(self, snap: UsageSnapshot) -> None:
+        """One block per allowance: name, percent, bar, then that block's reset."""
+        self._clear_breakdown()
+        pools = snap.pools()
+        if not pools:
+            fuel_h = _fuel_block_height()
+            height = PAD_Y + fuel_h + PAD_Y
+            self._fit_pools(height)
+            self._draw_fuel(height - PAD_Y)
+            return
+        footnote = None if snap.error else snap.plan_note()
+        plan = snap.plan_name()
+        heights = [
+            _pool_block_height(bool(footnote) and sl.label == plan)
+            for sl in pools
+        ]
+        fuel_h = _fuel_block_height()
+        height = PAD_Y + fuel_h + sum(heights) + PAD_Y
+        self._fit_pools(height)
+        self._draw_fuel(height - PAD_Y)
+        bar_w = HUD_WIDTH - 2 * PAD_X
+        top = height - PAD_Y - fuel_h
+        for sl, block_h in zip(pools, heights):
+            top -= block_h
+            content_top = top + block_h - POOL_GAP
+            name_y = content_top - POOL_NAME_H
+            label = _make_text_field(
+                PAD_X,
+                name_y,
+                HUD_WIDTH - 110,
+                POOL_NAME_H,
+                size=18,
+                weight=NSFontWeightSemibold,
+                color=_TEXT,
+                mono=False,
+            )
+            _set_text(label, sl.label)
+            self._track_breakdown(label)
+
+            pct_color = self._level_color(sl.level()) if sl.usage_pct is not None else _TEXT_MUTED
+            pct = _make_text_field(
+                HUD_WIDTH - PAD_X - 84,
+                name_y,
+                84,
+                POOL_NAME_H,
+                size=20,
+                weight=NSFontWeightSemibold,
+                color=pct_color,
+                align="right",
+                mono=True,
+            )
+            _set_text(pct, sl.value_text(), color=pct_color)
+            self._track_breakdown(pct)
+
+            bar_y = name_y - 8 - POOL_BAR_H
+            self._add_pool_bar(PAD_X, bar_y, bar_w, sl.usage_pct, pct_color)
+
+            reset_y = bar_y - 6 - POOL_RESET_H
+            reset = _make_text_field(
+                PAD_X,
+                reset_y,
+                bar_w,
+                POOL_RESET_H,
+                size=15,
+                weight=NSFontWeightRegular,
+                color=_TELEM_VALUE,
+                mono=True,
+            )
+            reset_text = sl.reset_line() or "reset time unavailable"
+            _set_text(reset, reset_text, color=_TELEM_VALUE)
+            self._track_breakdown(reset)
+
+            if footnote and sl.label == plan:
+                note = _make_text_field(
+                    PAD_X,
+                    reset_y - 16,
+                    bar_w,
+                    16,
+                    size=LABEL_SIZE,
+                    weight=NSFontWeightRegular,
+                    color=_TEXT_MUTED,
+                    mono=True,
+                )
+                _set_text(note, footnote, color=_TEXT_MUTED)
+                self._track_breakdown(note)
+
     # ------------------------------------------------------------------
     # Snapshot
     # ------------------------------------------------------------------
 
     def _apply_loading(self) -> None:
-        rows = [("STATUS", "…")]
-        height = self._height_for_metrics(len(rows))
-        self._resize_to(height)
-        self._set_level("ok")
-        self._set_bar(0)
-        _set_text(self._gauge_label, "USAGE", color=_TELEM_LABEL, kern=0.8)
-        _set_text(self._gauge_pct, "—%", color=_TEXT_MUTED)
-        _set_text(self._live, "…", color=_TEXT_MUTED, kern=0.8)
-        self._render_metrics(rows, height)
+        self._clear_breakdown()
+        fuel_h = _fuel_block_height()
+        height = PAD_Y + fuel_h + POOL_NAME_H + PAD_Y
+        self._fit_pools(height)
+        self._draw_fuel(height - PAD_Y)
+        loading = _make_text_field(
+            PAD_X,
+            PAD_Y,
+            HUD_WIDTH - 2 * PAD_X,
+            POOL_NAME_H,
+            size=18,
+            weight=NSFontWeightSemibold,
+            color=_TEXT_MUTED,
+            mono=False,
+        )
+        _set_text(loading, "Loading usage", color=_TEXT_MUTED)
+        self._track_breakdown(loading)
 
     def _apply_snapshot(self, snap: UsageSnapshot) -> None:
-        rows = snap.metric_rows()
-        preferred: List[Tuple[str, str]] = []
-        for key in (
-            "RESET",
-            "CREDITS",
-            "AUTO TOPUP",
-            "PAYG",
-            "TIER",
-            "STATUS",
-            "ERROR",
-            "HINT",
-        ):
-            for lab, val in rows:
-                if lab == key and (lab, val) not in preferred:
-                    preferred.append((lab, val))
-        if not preferred:
-            preferred = list(rows)
-
-        n = min(4, max(1, len(preferred)))
-        height = self._height_for_metrics(n)
-        self._resize_to(height)
-        level = snap.gauge_level()
-        self._set_level(level)
-
-        if snap.error:
-            _set_text(self._gauge_label, "USAGE", color=_TELEM_LABEL, kern=0.8)
-            _set_text(self._gauge_pct, "?", color=_RED)
-            self._set_bar(0)
-            err = snap.error if len(snap.error) <= 28 else snap.error[:27] + "…"
-            preferred = [("ERROR", err), ("HINT", "grok login")]
-            height = self._height_for_metrics(len(preferred))
-            self._resize_to(height)
-            self._render_metrics(preferred, height)
-            return
-
-        _set_text(
-            self._gauge_label,
-            snap.usage_label.upper(),
-            color=_TELEM_LABEL,
-            kern=0.8,
-        )
-        pct_color = _TELEM_VALUE
-        if level == "warn":
-            pct_color = _YELLOW
-        elif level == "bad":
-            pct_color = _RED
-        _set_text(self._gauge_pct, f"{snap.usage_pct_display}%", color=pct_color)
-        self._set_bar(snap.usage_pct)
-        self._render_metrics(preferred[:4], height)
+        self._render_pools(snap)
 
     # ------------------------------------------------------------------
     # Position

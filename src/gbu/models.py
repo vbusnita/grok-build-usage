@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Optional
@@ -50,6 +51,98 @@ def _parse_period_end(iso: Optional[str]) -> Optional[str]:
         return None
 
 
+_PRODUCT_LABELS = {
+    "grokbuild": "Grok Build",
+    "grokbot": "Grok Bot",
+    "sand": "Grok Bot",
+    "grok": "Grok",
+    "api": "API",
+}
+
+
+# Products that draw the shared weekly pool. Shown in the plan note, not as rows.
+_SHARED_SLICE = {
+    "Grok Build": "Build",
+    "Build": "Build",
+    "Chat": "Chat",
+    "Grok Chat": "Chat",
+    "Imagine": "Imagine",
+    "Grok Imagine": "Imagine",
+    "Voice": "Voice",
+    "Grok Voice": "Voice",
+}
+_SHARED_ROW_LABELS = frozenset(_SHARED_SLICE)
+
+
+def product_label(raw: str) -> str:
+    """Human label for a billing productUsage name."""
+    key = re.sub(r"[^a-z0-9]", "", raw.lower())
+    if key in _PRODUCT_LABELS:
+        return _PRODUCT_LABELS[key]
+    spaced = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", raw).replace("_", " ").strip()
+    return spaced or raw
+
+
+def pct_display(pct: float) -> int:
+    """Floor to match Build SpendingLimiter truncation."""
+    return max(0, min(100, int(pct // 1)))
+
+
+@dataclass(frozen=True)
+class UsageSlice:
+    """One allowance: its own percent and its own reset clock."""
+
+    label: str
+    usage_pct: Optional[float]
+    resets: Optional[str] = None
+    detail: Optional[str] = None
+    plan: Optional[str] = None
+
+    @property
+    def pct_display(self) -> Optional[int]:
+        if self.usage_pct is None:
+            return None
+        return pct_display(self.usage_pct)
+
+    def level(self) -> str:
+        if self.usage_pct is None:
+            return "error"
+        if self.usage_pct >= 90.0:
+            return "bad"
+        if self.usage_pct >= 70.0:
+            return "warn"
+        return "ok"
+
+    def value_text(self) -> str:
+        shown = self.pct_display
+        if shown is None:
+            return "—"
+        return f"{shown}%"
+
+    def reset_line(self) -> Optional[str]:
+        """The clock that belongs to this allowance, then any short note."""
+        parts: list[str] = []
+        if self.resets:
+            parts.append(f"resets {self.resets}")
+        if self.detail:
+            parts.append(self.detail)
+        return " · ".join(parts) if parts else None
+
+    def menu_text(self) -> str:
+        if self.resets:
+            return f"{self.label}  {self.value_text()} · {self.resets}"
+        if self.detail:
+            return f"{self.label}  {self.value_text()}"
+        return f"{self.label}  {self.value_text()}"
+
+    def summary_text(self) -> str:
+        line = f"{self.label}: {self.value_text()}"
+        extra = self.reset_line()
+        if extra:
+            return f"{line} · {extra}"
+        return line
+
+
 @dataclass(frozen=True)
 class UsageSnapshot:
     """Normalized glanceable usage state for the HUD + menu bar."""
@@ -66,17 +159,103 @@ class UsageSnapshot:
     subscription_tier: Optional[str]
     auto_topup_enabled: Optional[bool]
     auto_topup_amount_cents: Optional[int]
+    products: tuple[UsageSlice, ...] = ()
+    bot: Optional[UsageSlice] = None
     error: Optional[str] = None
 
     @property
     def usage_pct_display(self) -> int:
         """Floor to match Build SpendingLimiter truncation."""
-        return max(0, min(100, int(self.usage_pct // 1)))
+        return pct_display(self.usage_pct)
+
+    def plan_name(self) -> str:
+        """Subscription that covers the shared week and grants Grok Bot."""
+        if self.bot is not None and self.bot.plan:
+            return self.bot.plan
+        if self.subscription_tier:
+            return self.subscription_tier
+        return "SuperGrok"
+
+    def breakdown_text(self) -> str:
+        """How the shared week was spent. Unlisted Chat, Imagine, and Voice are 0."""
+        spent = {"Build": 0.0, "Chat": 0.0, "Imagine": 0.0, "Voice": 0.0}
+        seen: set[str] = set()
+        for product in self.products:
+            name = _SHARED_SLICE.get(product.label)
+            if name is None or product.usage_pct is None:
+                continue
+            spent[name] = product.usage_pct
+            seen.add(name)
+        if "Build" not in seen and not seen:
+            spent["Build"] = self.usage_pct
+        return " · ".join(f"{name} {pct_display(spent[name])}%" for name in ("Build", "Chat", "Imagine", "Voice"))
+
+    def plan_note(self) -> str:
+        """Product mix under the plan, then credits when they exist."""
+        extra = self.account_footnote()
+        mix = self.breakdown_text()
+        if extra:
+            return f"{mix} · {extra}"
+        return mix
+
+    def pools(self) -> list[UsageSlice]:
+        """The shared SuperGrok week, then any other product on that bill, then Grok Bot.
+
+        Chat, Imagine, and Voice stay in the week's note instead of their own
+        rows. Grok Bot keeps the separate clock from its own usage status.
+        """
+        if self.error:
+            rows = [UsageSlice(label="Grok Build", usage_pct=None, detail=self.error)]
+        else:
+            rows = [
+                UsageSlice(
+                    label=self.plan_name(),
+                    usage_pct=self.usage_pct,
+                    resets=self.period_end_display,
+                )
+            ]
+            for product in self.products:
+                if product.label in _SHARED_ROW_LABELS or product.label == "Grok Bot":
+                    continue
+                rows.append(
+                    UsageSlice(
+                        label=product.label,
+                        usage_pct=product.usage_pct,
+                        resets=self.period_end_display,
+                    )
+                )
+        if self.bot is not None:
+            rows.append(self.bot)
+        return rows
+
+    def account_footnote(self) -> Optional[str]:
+        """Credits and pay-as-you-go for the Build pool. Not a second clock."""
+        parts: list[str] = []
+        prepaid = self.prepaid_display()
+        if prepaid:
+            parts.append(f"credits {prepaid}")
+            if self.auto_topup_enabled is True and self.auto_topup_amount_cents is not None:
+                parts.append(f"auto top-up {_fmt_dollars(self.auto_topup_amount_cents)}")
+            elif self.auto_topup_enabled is False:
+                parts.append("auto top-up off")
+        if self.pay_as_you_go:
+            used = abs(self.on_demand_used_cents or 0)
+            cap = abs(self.on_demand_cap_cents or 0)
+            parts.append(f"pay as you go {_fmt_dollars(used)} / {_fmt_dollars(cap)}")
+        return " · ".join(parts) if parts else None
+
+    def menu_lines(self) -> list[str]:
+        """Short lines for the menu-bar menu."""
+        return [sl.menu_text() for sl in self.pools()]
 
     def menu_title(self) -> str:
         if self.error:
             return "GBU · ?"
-        return f"GBU · {self.usage_pct_display}%"
+        title = f"GBU · {self.usage_pct_display}%"
+        bot_pct = self.bot.pct_display if self.bot is not None else None
+        if bot_pct is not None:
+            title = f"{title} · Bot {bot_pct}%"
+        return title
 
     def gauge_level(self) -> str:
         """ok | warn | bad | error — mirrors Lyra bar-gauge / status-hud bands."""
@@ -104,9 +283,6 @@ class UsageSnapshot:
             ]
 
         rows: list[tuple[str, str]] = []
-        if self.period_end_display:
-            rows.append(("RESET", self.period_end_display))
-
         prepaid = self.prepaid_display()
         if prepaid:
             rows.append(("CREDITS", prepaid))
@@ -127,10 +303,15 @@ class UsageSnapshot:
 
     def summary_lines(self) -> list[str]:
         """Plain-text lines (CLI `--once` / debug)."""
+        lines = []
+        plan = self.plan_name()
+        for sl in self.pools():
+            text = sl.summary_text()
+            if sl.label == plan and not self.error:
+                text = f"{text} · {self.breakdown_text()}"
+            lines.append(text)
         if self.error:
-            return [self.error, "Run `grok login` if auth expired."]
-
-        lines = [f"{self.usage_label}: {self.usage_pct_display}%"]
+            lines.append("Run `grok login` if auth expired.")
         for label, value in self.metric_rows():
             if label == "STATUS":
                 continue
@@ -146,10 +327,33 @@ class UsageSnapshot:
         return lines
 
 
+def _products_from_config(config: dict[str, Any]) -> tuple[UsageSlice, ...]:
+    raw = config.get("productUsage") or config.get("product_usage") or []
+    if not isinstance(raw, list):
+        return ()
+    slices: list[UsageSlice] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("product") or item.get("name") or ""
+        if not isinstance(name, str) or not name.strip():
+            continue
+        pct_raw = item.get("usagePercent")
+        if pct_raw is None:
+            pct_raw = item.get("usage_percent")
+        try:
+            pct = max(0.0, min(100.0, float(pct_raw)))
+        except (TypeError, ValueError):
+            continue
+        slices.append(UsageSlice(label=product_label(name), usage_pct=pct))
+    return tuple(slices)
+
+
 def snapshot_from_billing(
     payload: dict[str, Any],
     *,
     auto_topup: Optional[dict[str, Any]] = None,
+    bot: Optional[UsageSlice] = None,
     error: Optional[str] = None,
 ) -> UsageSnapshot:
     """Map backend billing JSON → UsageSnapshot."""
@@ -167,6 +371,8 @@ def snapshot_from_billing(
             subscription_tier=None,
             auto_topup_enabled=None,
             auto_topup_amount_cents=None,
+            products=(),
+            bot=bot,
             error=error,
         )
 
@@ -258,5 +464,7 @@ def snapshot_from_billing(
         subscription_tier=str(tier) if tier else None,
         auto_topup_enabled=auto_enabled,
         auto_topup_amount_cents=auto_amount,
+        products=_products_from_config(config),
+        bot=bot,
         error=None,
     )
