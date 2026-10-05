@@ -42,11 +42,23 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     if args.once:
+        import time
+        from datetime import datetime
+
         from gbu.billing import fetch_snapshot
+        from gbu.bot_usage import fetch_bot_token_total
+        from gbu.fuel import FuelMeter, load_build_burns
 
         snap = fetch_snapshot()
         for line in snap.summary_lines():
             print(line)
+        reading = FuelMeter().observe(
+            load_build_burns(),
+            fetch_bot_token_total(),
+            datetime.now().astimezone(),
+            time.monotonic(),
+        )
+        print(reading.menu_text())
         return 1 if snap.error else 0
 
     if sys.platform != "darwin":

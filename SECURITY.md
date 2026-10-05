@@ -3,15 +3,18 @@
 ## What this app touches
 
 - **Reads** `~/.grok/auth.json` (your existing Grok Build / grok.com OIDC session).
-- **Calls** xAI’s CLI chat proxy billing endpoints with that session token.
+- **Reads** the Grok Bot session already on this Mac (its secrets file and the Keychain item Grok Bot created) and decrypts that access token in memory.
+- **Reads** local Grok Build session files under `~/.grok/sessions` for the fuel gauge.
+- **Calls** xAI’s CLI chat proxy billing endpoints with the Build session token.
+- **Calls** the Grok Bot dashboard API (`api2.cursor.sh`) for the Bot allowance and today’s token total.
 - **Never** asks for your password or API key in a web form of its own.
-- **Never** uploads usage data to a third party — all network traffic is to xAI.
+- **Never** uploads usage data anywhere else. Network traffic is only those two APIs.
 
 ## What we do not do
 
-- Store credentials outside of what Grok Build already wrote locally
-- Log tokens or refresh tokens (logs are local: `~/Library/Logs/grok-build-usage.log`)
-- Require a separate xAI API key for the account-pool gauge
+- Store credentials beyond what Grok Build and Grok Bot already wrote locally
+- Log tokens, refresh tokens, or Keychain material (logs are local: `~/Library/Logs/grok-build-usage.log`)
+- Require a separate API key for either gauge
 
 ## Reporting issues
 
