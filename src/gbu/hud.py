@@ -6,6 +6,7 @@ directly on the desktop as translucent-free floating UI.
 
 from __future__ import annotations
 
+import ctypes
 import logging
 from typing import List, Optional, Sequence, Tuple
 
@@ -35,7 +36,6 @@ from AppKit import (
     NSWindowStyleMaskBorderless,
     NSWindowStyleMaskNonactivatingPanel,
 )
-from CoreFoundation import CFRetain
 from Foundation import (
     NSAttributedString,
     NSDictionary,
@@ -95,24 +95,35 @@ def _ns_color(rgba: Tuple[float, float, float, float]) -> NSColor:
 
 
 _CG_CACHE: dict = {}
-_NS_COLOR_CACHE: dict = {}
+_CGCOLOR_READY = False
+
+
+def _register_cgcolor() -> None:
+    """Teach PyObjC that CGColor is a CoreFoundation type.
+
+    Without this, ``NSColor.CGColor()`` is a raw unowned pointer. Caching that
+    pointer and passing it to ``CALayer.setBackgroundColor:`` on a later timer
+    CFRetains a freed color. The process dies with SIGTRAP and LaunchAgent
+    brings the overlay back. ``CFRetain`` on the raw pointer does not keep it.
+    """
+    global _CGCOLOR_READY
+    if _CGCOLOR_READY:
+        return
+    lib = ctypes.CDLL("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics")
+    lib.CGColorGetTypeID.restype = ctypes.c_ulong
+    objc.registerCFSignature("CGColor", b"^{CGColor=}", lib.CGColorGetTypeID())
+    _CGCOLOR_READY = True
+
+
+_register_cgcolor()
 
 
 def _cg_color(rgba: Tuple[float, float, float, float]):
-    """A CGColor that stays valid for the process lifetime.
-
-    ``NSColor.CGColor()`` is an unowned pointer. Caching it and handing it to
-    ``CALayer.setBackgroundColor:`` later CFRetains a freed color and the
-    process dies with SIGTRAP. LaunchAgent then relaunches the overlay.
-    """
     key = tuple(rgba)
     cg = _CG_CACHE.get(key)
     if cg is not None:
         return cg
-    ns = _ns_color(rgba)
-    cg = ns.CGColor()
-    CFRetain(cg)
-    _NS_COLOR_CACHE[key] = ns
+    cg = _ns_color(rgba).CGColor()
     _CG_CACHE[key] = cg
     return cg
 
