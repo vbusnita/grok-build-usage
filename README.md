@@ -4,7 +4,7 @@
 
 The overlay has three blocks:
 
-- **Fuel** — tokens burned by the live session. The number is the burn. The bar and the word (quiet, easy, steady, hard) are the pace, not a percent of the weekly allowance.
+- **Fuel** — tokens in the live session. With the Grok Build TUI that is the burn from its session file. In Cursor it is the open chat’s context size, since Cursor does not write that file. The bar and the word (quiet, easy, steady, hard) are the pace, not a percent of the weekly allowance.
 - **The plan** — one shared pool (SuperGrok Plus, for example) for Build, Chat, Imagine, and Voice, with that pool’s own reset. A product you have not used since the reset shows 0%.
 - **Grok Bot** — its own allowance and its own reset. The plan name stays on the shared pool.
 
@@ -26,7 +26,7 @@ Toggle the overlay from the menu bar anytime (**Hide / Show Overlay**).
 |------|--------|
 | **macOS** | Menu bar + AppKit HUD |
 | **Python 3.10+** | 3.11/3.12 recommended |
-| **Grok Build logged in** | Run `grok login` (or `/login` in the TUI) once so `~/.grok/auth.json` exists |
+| **Grok Build logged in** | Run `grok login` (or `/login` in the TUI) once so `~/.grok/auth.json` exists. After that the app refreshes the session itself; the TUI does not need to stay open |
 
 ## Install (anyone)
 
@@ -85,11 +85,11 @@ gbu --poll 20    # refresh every 20s
 
 ## How it works (for your account)
 
-1. **Auth** — reads the OIDC session from `~/.grok/auth.json` written by Grok Build.  
+1. **Auth** — reads the OIDC session from `~/.grok/auth.json` written by Grok Build, and refreshes it when the access token expires. Opening the TUI is not required.  
 2. **Billing** — `GET https://cli-chat-proxy.grok.com/v1/billing?format=credits` (same family of calls Build uses for `/usage`). The plan percent is the shared pool. Build, Chat, Imagine, and Voice are the mix under that reset.  
 3. **Auto top-up** — optional `…/auto-topup-rule`.  
 4. **Grok Bot** — decrypts the local Grok Bot session in memory and reads its own allowance (`GetSandUsageStatus`) plus today’s token total. The token is not logged. If Bot is signed out, the plan gauge still shows.  
-5. **Fuel** — sums `totalTokens` from live `~/.grok/sessions` usage files. Bot tokens count only after they rise past the first sample in this sitting.  
+5. **Fuel** — sums `totalTokens` from live `~/.grok/sessions` usage files, and adds the context size of Cursor chats updated in the last few minutes (`state.vscdb` composer data, read-only). Bot tokens count only after they rise past the first sample in this sitting.  
 6. **UI** — menu bar + floating always-on-top HUD. Billing polls about every 45s. Fuel rereads local session files about every 5s.
 
 No credentials are sent anywhere except xAI (the plan pool) and the Grok Bot API (the Bot allowance). This app does not store your password.

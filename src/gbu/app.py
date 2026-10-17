@@ -35,7 +35,7 @@ import rumps
 
 from gbu.billing import fetch_snapshot
 from gbu.bot_usage import fetch_bot_token_total
-from gbu.fuel import FuelMeter, FuelReading, load_build_burns
+from gbu.fuel import FuelMeter, FuelReading, load_fuel_burns
 from gbu.hud import UsageHUD, saved_hud_visible, set_hud_visible
 from gbu.models import UsageSnapshot
 
@@ -656,7 +656,7 @@ class GrokBuildUsageApp(rumps.App):
             bot_daily = self._bot_daily
         try:
             reading = self._fuel_meter.observe(
-                load_build_burns(),
+                load_fuel_burns(),
                 bot_daily,
                 datetime.now().astimezone(),
                 now_mono,
