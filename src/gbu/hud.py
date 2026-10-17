@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import ctypes
 import logging
+import math
 from typing import List, Optional, Sequence, Tuple
 
 import objc
 from AppKit import (
     NSBackingStoreBuffered,
+    NSBezierPath,
     NSColor,
     NSFont,
     NSFontAttributeName,
@@ -25,7 +27,9 @@ from AppKit import (
     NSImageSymbolConfiguration,
     NSImageView,
     NSKernAttributeName,
+    NSMutableParagraphStyle,
     NSPanel,
+    NSParagraphStyleAttributeName,
     NSFloatingWindowLevel,
     NSShadow,
     NSShadowAttributeName,
@@ -47,7 +51,7 @@ from Foundation import (
 )
 
 from gbu.fuel import FuelReading
-from gbu.models import UsageSlice, UsageSnapshot
+from gbu.models import UsageSnapshot, pct_display
 
 log = logging.getLogger(__name__)
 
@@ -62,6 +66,31 @@ _GREEN = (74 / 255, 222 / 255, 128 / 255, 1.0)   # brighter for bare desktop
 _YELLOW = (250 / 255, 204 / 255, 21 / 255, 1.0)
 _RED = (248 / 255, 113 / 255, 113 / 255, 1.0)
 _TRACK = (1.0, 1.0, 1.0, 0.22)
+_TICK = (1.0, 1.0, 1.0, 0.28)
+# grok.com/dashboard/usage chart hues, --th-chart-1 through --th-chart-8.
+# shareSeriesColor(i) resolves to slot (i % 8) + 1.
+# Pinned series: Cursor 0, Bot 2, Chat 4. Build is the first unpinned series
+# (index 6 → slot 7). Imagine is the next unpinned series (slot 8).
+# Voice is not on the live chart; slot 9 would repeat Cursor's blue, so it
+# takes slot 2, the next palette hue that stays distinct on the key.
+_CHART = {
+    1: (0x10 / 255, 0x84 / 255, 0xFE / 255, 1.0),  # #1084FE
+    2: (0x00 / 255, 0xC9 / 255, 0x72 / 255, 1.0),  # #00C972
+    3: (0xFF / 255, 0x98 / 255, 0x00 / 255, 1.0),  # #FF9800
+    4: (0xFF / 255, 0x30 / 255, 0x9B / 255, 1.0),  # #FF309B
+    5: (0x91 / 255, 0x59 / 255, 0xFE / 255, 1.0),  # #9159FE
+    6: (0xFF / 255, 0x26 / 255, 0x3C / 255, 1.0),  # #FF263C
+    7: (0x00 / 255, 0xBC / 255, 0xA6 / 255, 1.0),  # #00BCA6
+    8: (0xFF / 255, 0x67 / 255, 0x00 / 255, 1.0),  # #FF6700
+}
+_SLICE_COLOR = {
+    "Cursor": _CHART[1],
+    "Bot": _CHART[3],
+    "Chat": _CHART[5],
+    "Build": _CHART[7],
+    "Imagine": _CHART[8],
+    "Voice": _CHART[2],
+}
 _SHADOW = (0.0, 0.0, 0.0, 0.55)
 
 # Layout — scaled up for glanceability at arm’s length
@@ -78,12 +107,14 @@ METRIC_GAP = 22.0
 METRIC_BLOCK_H = 44.0
 POOL_NAME_H = 24.0
 POOL_BAR_H = 6.0
+MASTER_BAR_H = 10.0
 POOL_RESET_H = 18.0
 POOL_GAP = 18.0
-FUEL_NAME_H = 24.0
-FUEL_BAR_H = 8.0
-FUEL_DETAIL_H = 18.0
-FUEL_GAP = 20.0
+FUEL_DIAL_W = 260.0
+FUEL_DIAL_H = 198.0
+FUEL_GAP = 10.0
+_DIAL_START = 210.0
+_DIAL_SWEEP = 240.0
 FRAME_KEY = "gbu.hudLastOrigin"
 VISIBLE_KEY = "gbu.hudVisible"
 _TOOLS_SYMBOL = "wrench.and.screwdriver"
@@ -178,7 +209,9 @@ def _make_text_field(
     lab.setStringValue_("")
     if align == "right":
         lab.setAlignment_(2)
-    _LABEL_STYLE[id(lab)] = {"font": font, "color": color, "kern": kern}
+    elif align == "center":
+        lab.setAlignment_(1)
+    _LABEL_STYLE[id(lab)] = {"font": font, "color": color, "kern": kern, "align": align}
     return lab
 
 
@@ -191,13 +224,16 @@ def _set_text(lab: NSTextField, text: str, color=None, kern: Optional[float] = N
         style = dict(style)
         style["color"] = color
         _LABEL_STYLE[id(lab)] = style
+    paragraph = NSMutableParagraphStyle.alloc().init()
+    paragraph.setAlignment_({"center": 1, "right": 2}.get(style.get("align", "left"), 0))
     attrs = NSDictionary.dictionaryWithObjects_forKeys_(
-        [font, _ns_color(rgba), float(k), _text_shadow()],
+        [font, _ns_color(rgba), float(k), _text_shadow(), paragraph],
         [
             NSFontAttributeName,
             NSForegroundColorAttributeName,
             NSKernAttributeName,
             NSShadowAttributeName,
+            NSParagraphStyleAttributeName,
         ],
     )
     lab.setAttributedStringValue_(
@@ -205,15 +241,262 @@ def _set_text(lab: NSTextField, text: str, color=None, kern: Optional[float] = N
     )
 
 
-def _pool_block_height(footnote: bool) -> float:
-    height = POOL_NAME_H + 8 + POOL_BAR_H + 6 + POOL_RESET_H
-    if footnote:
-        height += 16
-    return height + POOL_GAP
+def _mono_width(text: str, size: float, weight=NSFontWeightMedium) -> float:
+    font = NSFont.monospacedSystemFontOfSize_weight_(size, weight)
+    astr = NSAttributedString.alloc().initWithString_attributes_(
+        text,
+        NSDictionary.dictionaryWithObjects_forKeys_([font], [NSFontAttributeName]),
+    )
+    return float(astr.size().width)
+
+
+def _legend_fit(
+    parts: Sequence[Tuple[str, float]],
+    width: float,
+) -> Tuple[float, float, float, float, float, List[float]]:
+    """Largest type that keeps every ``Name N%`` on one line.
+
+    ``pct_display`` clamps at 100, so the widest line is every slice at 100%.
+    The search keeps shrinking until that line fits ``width``.
+
+    Returns font size, swatch, gap, swatch-to-text pad, row height, and the
+    measured width of each label.
+    """
+    labels = [f"{name} {pct_display(pct)}%" for name, pct in parts]
+    if not labels:
+        return 11.0, 6.0, 8.0, 3.0, 16.0, []
+    slots = len(labels) - 1
+    # 13pt down to 6pt. Shrink the gap before giving up a half point.
+    for step in range(26, 11, -1):
+        size = step / 2.0
+        swatch = 6.0 if size >= 10.0 else (5.0 if size >= 8.0 else 4.0)
+        pad = 3.0 if size >= 9.0 else 2.0
+        # Extra points so the text field's inset does not clip the percent.
+        slack = 8.0 if size >= 8.0 else 6.0
+        widths = [_mono_width(text, size) + slack for text in labels]
+        body = sum(swatch + pad + tw for tw in widths)
+        for gap in (8.0, 6.0, 4.0, 2.0):
+            if body + gap * slots <= width:
+                return size, swatch, gap, pad, size + 5.0, widths
+    size = 6.0
+    swatch, pad, gap, slack = 4.0, 2.0, 2.0, 4.0
+    widths = [_mono_width(text, size) + slack for text in labels]
+    return size, swatch, gap, pad, size + 4.0, widths
+
+
+def _pool_block_height(*, master: bool, legend_h: float, extra_h: float) -> float:
+    bar_h = MASTER_BAR_H if master else POOL_BAR_H
+    below = 4.0 if legend_h or extra_h else 0.0
+    return POOL_NAME_H + 8 + bar_h + 6 + POOL_RESET_H + below + legend_h + extra_h + POOL_GAP
 
 
 def _fuel_block_height() -> float:
-    return FUEL_NAME_H + 8 + FUEL_BAR_H + 6 + FUEL_DETAIL_H + FUEL_GAP
+    return FUEL_DIAL_H + FUEL_GAP
+
+
+def _dial_frame(
+    width: float = FUEL_DIAL_W,
+    height: float = FUEL_DIAL_H,
+) -> Tuple[float, float, float, float]:
+    """Center, outer radius, and the radius text must stay inside."""
+    radius = min(width / 2.0 - 8.0, height - 12.0)
+    cx = width / 2.0
+    cy = height - 6.0 - radius
+    inner = max(20.0, radius - 18.0)
+    return cx, cy, radius, inner
+
+
+def _bowl_text_width(y_mid: float) -> float:
+    """How wide a centered line can be at ``y_mid`` without crossing the ticks."""
+    _cx, cy, _radius, inner = _dial_frame()
+    dy = y_mid - cy
+    limit = inner - 2.0
+    if abs(dy) >= limit:
+        return 40.0
+    chord = 2.0 * math.sqrt(limit * limit - dy * dy)
+    return max(40.0, chord - 10.0)
+
+
+class _DialRow:
+    def __init__(self, text: str, size: float, y: float, h: float, width: float, kern: float):
+        self.text = text
+        self.size = size
+        self.y = y
+        self.h = h
+        self.width = width
+        self.kern = kern
+
+
+def _split_to_width(text: str, size: float, max_width: float) -> List[str]:
+    """Break a phrase into lines that each fit ``max_width``."""
+    if _mono_width(text, size) + 6.0 <= max_width:
+        return [text]
+    words = text.split()
+    if len(words) <= 1:
+        return [text]
+    lines: List[str] = []
+    current = ""
+    for word in words:
+        trial = word if not current else f"{current} {word}"
+        if _mono_width(trial, size) + 6.0 <= max_width:
+            current = trial
+        else:
+            if current:
+                lines.append(current)
+            current = word
+    if current:
+        lines.append(current)
+    return lines or [text]
+
+
+def _layout_dial(amount: str, lines: Sequence[str]) -> Tuple[_DialRow, List[_DialRow]]:
+    """Stack the readout and its labels inside the open arc.
+
+    The number sits high in the bowl. ``FUEL`` and each pace phrase sit on
+    their own line under it, narrowed to the chord at that height.
+    """
+    _cx, cy, radius, inner = _dial_frame()
+    # Stay above the open ends of the arc (210° and -30°, sin = -0.5).
+    top = cy + inner - 8.0
+    bottom = max(8.0, cy - 0.5 * radius + 8.0)
+    phrases = ["FUEL", *lines]
+
+    def fits(text: str, size: float, y: float, h: float, kern: float) -> bool:
+        mid = y + h / 2.0
+        if mid < bottom or y < 2.0 or y + h > FUEL_DIAL_H - 2.0:
+            return False
+        need = _mono_width(text, size, NSFontWeightSemibold if kern < 0 else NSFontWeightMedium)
+        need += max(0, len(text) - 1) * max(0.0, kern) + 6.0
+        return need <= _bowl_text_width(mid)
+
+    for amount_size in (34, 32, 30, 28, 26, 24, 22, 20):
+        for label_size in (12.0, 11.0, 10.0, 9.0, 8.0):
+            amount_h = amount_size + 6.0
+            label_h = label_size + 4.0
+            packed: List[Tuple[str, float]] = []
+            for phrase in phrases:
+                kern = 1.5 if phrase == "FUEL" else 0.0
+                parts = _split_to_width(phrase, label_size, _bowl_text_width(cy))
+                packed.extend((part, kern) for part in parts)
+            block = amount_h + 2.0 + label_h * len(packed)
+            y_amount = top - amount_h
+            if y_amount - block + amount_h < bottom:
+                continue
+            if not fits(amount, float(amount_size), y_amount, amount_h, -0.6):
+                continue
+            y = y_amount - 2.0
+            rows: List[_DialRow] = []
+            ok = True
+            for text, kern in packed:
+                y -= label_h
+                if not fits(text, label_size, y, label_h, kern):
+                    ok = False
+                    break
+                mid = y + label_h / 2.0
+                rows.append(
+                    _DialRow(text, label_size, y, label_h, _bowl_text_width(mid), kern)
+                )
+            if ok:
+                mid = y_amount + amount_h / 2.0
+                return (
+                    _DialRow(
+                        amount,
+                        float(amount_size),
+                        y_amount,
+                        amount_h,
+                        _bowl_text_width(mid),
+                        -0.6,
+                    ),
+                    rows,
+                )
+    # Smallest sizes still have to land inside the bowl.
+    amount_h = 26.0
+    label_h = 12.0
+    y_amount = top - amount_h
+    rows = []
+    y = y_amount - 2.0
+    for phrase in phrases:
+        y -= label_h
+        mid = y + label_h / 2.0
+        rows.append(_DialRow(phrase, 8.0, y, label_h, _bowl_text_width(mid), 0.0))
+    mid = y_amount + amount_h / 2.0
+    return _DialRow(amount, 20.0, y_amount, amount_h, _bowl_text_width(mid), -0.6), rows
+
+
+class FuelDialView(NSView):
+    """Open arc and tick ring. The digital readout sits on top as text fields."""
+
+    def initWithFrame_(self, frame):  # noqa: N802
+        self = objc.super(FuelDialView, self).initWithFrame_(frame)
+        if self is None:
+            return None
+        self.fillFraction = 0.0
+        self.strokeColor = _ns_color(_TELEM_VALUE)
+        return self
+
+    def isOpaque(self):  # noqa: N802
+        return False
+
+    def drawRect_(self, _dirty):  # noqa: N802
+        bounds = self.bounds()
+        cx, cy, radius, _inner = _dial_frame(bounds.size.width, bounds.size.height)
+        if radius < 20.0:
+            return
+        center = NSPoint(cx, cy)
+        start = _DIAL_START
+        sweep = _DIAL_SWEEP
+        fill = max(0.0, min(1.0, float(self.fillFraction)))
+
+        track = NSBezierPath.bezierPath()
+        track.appendBezierPathWithArcWithCenter_radius_startAngle_endAngle_clockwise_(
+            center, radius, start, start - sweep, True
+        )
+        track.setLineWidth_(3.0)
+        track.setLineCapStyle_(1)
+        _ns_color(_TRACK).setStroke()
+        track.stroke()
+
+        ticks = 24
+        for index in range(ticks + 1):
+            t = index / ticks
+            ang = math.radians(start - t * sweep)
+            major = index % 6 == 0
+            outer_r = radius - 7.0
+            inner_r = outer_r - (9.0 if major else 4.5)
+            tick = NSBezierPath.bezierPath()
+            tick.moveToPoint_(
+                NSPoint(cx + inner_r * math.cos(ang), cy + inner_r * math.sin(ang))
+            )
+            tick.lineToPoint_(
+                NSPoint(cx + outer_r * math.cos(ang), cy + outer_r * math.sin(ang))
+            )
+            tick.setLineWidth_(1.6 if major else 1.0)
+            tick.setLineCapStyle_(1)
+            if fill > 0.0 and t <= fill + 1e-6:
+                self.strokeColor.setStroke()
+            else:
+                _ns_color(_TICK).setStroke()
+            tick.stroke()
+
+        if fill <= 0.004:
+            return
+        value = NSBezierPath.bezierPath()
+        value.appendBezierPathWithArcWithCenter_radius_startAngle_endAngle_clockwise_(
+            center, radius, start, start - fill * sweep, True
+        )
+        value.setLineWidth_(3.5)
+        value.setLineCapStyle_(1)
+        self.strokeColor.setStroke()
+        value.stroke()
+        tip = math.radians(start - fill * sweep)
+        tx = cx + radius * math.cos(tip)
+        ty = cy + radius * math.sin(tip)
+        dot_r = 3.5
+        dot = NSBezierPath.bezierPathWithOvalInRect_(
+            NSRect(NSPoint(tx - dot_r, ty - dot_r), NSSize(dot_r * 2, dot_r * 2))
+        )
+        self.strokeColor.setFill()
+        dot.fill()
 
 
 def _tools_image(point_size: float = 18.0) -> Optional[NSImage]:
@@ -603,60 +886,42 @@ class UsageHUD(NSObject):
         return _TELEM_VALUE
 
     def _draw_fuel(self, top_edge: float) -> None:
-        """Fuel block whose top sits at top_edge. Amount is tokens; bar is pace."""
+        """Fuel block whose top sits at top_edge. The number is tokens; the arc is pace."""
         reading = self._fuel
-        name_y = top_edge - FUEL_NAME_H
-        label = _make_text_field(
-            PAD_X,
-            name_y,
-            HUD_WIDTH - 120,
-            FUEL_NAME_H,
-            size=18,
-            weight=NSFontWeightSemibold,
-            color=_TEXT,
-            mono=False,
+        dial_x = (HUD_WIDTH - FUEL_DIAL_W) / 2.0
+        dial_y = top_edge - FUEL_DIAL_H
+        dial = FuelDialView.alloc().initWithFrame_(
+            NSRect(NSPoint(dial_x, dial_y), NSSize(FUEL_DIAL_W, FUEL_DIAL_H))
         )
-        _set_text(label, "Fuel")
-        self._track_breakdown(label)
-
         amount_color = self._pace_color(reading.level) if reading.sources else _TEXT_MUTED
-        amount = _make_text_field(
-            HUD_WIDTH - PAD_X - 100,
-            name_y,
-            100,
-            FUEL_NAME_H,
-            size=20,
-            weight=NSFontWeightSemibold,
-            color=amount_color,
-            align="right",
-            mono=True,
-        )
-        _set_text(amount, reading.amount_text(), color=amount_color)
-        self._track_breakdown(amount)
+        dial.fillFraction = reading.fill()
+        dial.strokeColor = _ns_color(amount_color)
+        self._track_breakdown(dial)
 
-        bar_y = name_y - 8 - FUEL_BAR_H
-        self._add_pool_bar(
-            PAD_X,
-            bar_y,
-            HUD_WIDTH - 2 * PAD_X,
-            reading.fill() * 100.0,
-            amount_color,
-            bar_h=FUEL_BAR_H,
-        )
+        amount, rows = _layout_dial(reading.amount_text(), reading.detail_lines())
+        cx = _dial_frame()[0]
 
-        detail_y = bar_y - 6 - FUEL_DETAIL_H
-        detail = _make_text_field(
-            PAD_X,
-            detail_y,
-            HUD_WIDTH - 2 * PAD_X,
-            FUEL_DETAIL_H,
-            size=15,
-            weight=NSFontWeightRegular,
-            color=_TELEM_VALUE,
-            mono=True,
-        )
-        _set_text(detail, reading.detail_text(), color=_TELEM_VALUE)
-        self._track_breakdown(detail)
+        def _place(row: _DialRow, color, weight) -> None:
+            field = _make_text_field(
+                dial_x + cx - row.width / 2.0,
+                dial_y + row.y,
+                row.width,
+                row.h,
+                size=row.size,
+                weight=weight,
+                color=color,
+                align="center",
+                mono=True,
+                kern=row.kern,
+            )
+            _set_text(field, row.text, color=color, kern=row.kern)
+            self._track_breakdown(field)
+
+        _place(amount, amount_color, NSFontWeightSemibold)
+        for row in rows:
+            color = _TELEM_LABEL if row.text == "FUEL" else _TELEM_VALUE
+            weight = NSFontWeightMedium if row.text == "FUEL" else NSFontWeightRegular
+            _place(row, color, weight)
 
     def _clear_breakdown(self) -> None:
         for view in self._breakdown_views:
@@ -708,6 +973,82 @@ class UsageHUD(NSObject):
         fill.layer().setBackgroundColor_(_cg_color(color if pct is not None else _TRACK))
         track.addSubview_(fill)
 
+    def _add_stacked_bar(
+        self,
+        x: float,
+        y: float,
+        width: float,
+        parts: Sequence[Tuple[str, float]],
+        bar_h: float,
+    ) -> None:
+        """One plan bar. Each product is a colored share of the week."""
+        track = NSView.alloc().initWithFrame_(
+            NSRect(NSPoint(x, y), NSSize(width, bar_h))
+        )
+        track.setWantsLayer_(True)
+        track.layer().setCornerRadius_(bar_h / 2)
+        track.layer().setMasksToBounds_(True)
+        track.layer().setBackgroundColor_(_cg_color(_TRACK))
+        self._track_breakdown(track)
+        widths: List[Tuple[str, float]] = []
+        for name, pct in parts:
+            if pct <= 0:
+                continue
+            widths.append((name, max(2.0, pct / 100.0 * width)))
+        total = sum(seg_w for _name, seg_w in widths)
+        if total > width and total > 0:
+            scale = width / total
+            widths = [(name, seg_w * scale) for name, seg_w in widths]
+        cursor = 0.0
+        for name, seg_w in widths:
+            fill = NSView.alloc().initWithFrame_(
+                NSRect(NSPoint(cursor, 0), NSSize(seg_w, bar_h))
+            )
+            fill.setWantsLayer_(True)
+            color = _SLICE_COLOR.get(name, _TELEM_VALUE)
+            fill.layer().setBackgroundColor_(_cg_color(color))
+            track.addSubview_(fill)
+            cursor += seg_w
+
+    def _draw_legend(
+        self,
+        parts: Sequence[Tuple[str, float]],
+        x: float,
+        bottom: float,
+        width: float,
+    ) -> None:
+        """One-line color key. ``bottom`` is the legend's lower edge."""
+        if not parts:
+            return
+        size, swatch, gap, pad, row_h, widths = _legend_fit(parts, width)
+        labels = [f"{name} {pct_display(pct)}%" for name, pct in parts]
+        used = sum(swatch + pad + tw for tw in widths) + gap * (len(parts) - 1)
+        cursor = x + max(0.0, (width - used) / 2.0)
+        for (name, _pct), text, label_w in zip(parts, labels, widths):
+            color = _SLICE_COLOR.get(name, _TELEM_VALUE)
+            swatch_y = bottom + (row_h - swatch) / 2.0
+            dot = NSView.alloc().initWithFrame_(
+                NSRect(NSPoint(cursor, swatch_y), NSSize(swatch, swatch))
+            )
+            dot.setWantsLayer_(True)
+            dot.layer().setCornerRadius_(swatch / 2.0)
+            dot.layer().setBackgroundColor_(_cg_color(color))
+            self._track_breakdown(dot)
+            cursor += swatch + pad
+            label = _make_text_field(
+                cursor,
+                bottom,
+                label_w,
+                row_h,
+                size=size,
+                weight=NSFontWeightMedium,
+                color=color,
+                mono=True,
+            )
+            _set_text(label, text, color=color)
+            self._track_breakdown(label)
+            cursor += label_w + gap
+
     def _render_pools(self, snap: UsageSnapshot) -> None:
         """One block per allowance: name, percent, bar, then that block's reset."""
         self._clear_breakdown()
@@ -718,17 +1059,24 @@ class UsageHUD(NSObject):
             self._fit_pools(height)
             self._draw_fuel(height - PAD_Y)
             return
-        footnote = None if snap.error else snap.plan_note()
         plan = snap.plan_name()
+        parts = () if snap.error else tuple(snap.breakdown_parts())
+        extra = None if snap.error else snap.account_footnote()
+        bar_w = HUD_WIDTH - 2 * PAD_X
+        legend_h = _legend_fit(parts, bar_w)[4] if parts else 0.0
+        extra_h = 16.0 if extra else 0.0
         heights = [
-            _pool_block_height(bool(footnote) and sl.label == plan)
+            _pool_block_height(
+                master=sl.label == plan and not snap.error,
+                legend_h=legend_h if sl.label == plan else 0.0,
+                extra_h=extra_h if sl.label == plan else 0.0,
+            )
             for sl in pools
         ]
         fuel_h = _fuel_block_height()
         height = PAD_Y + fuel_h + sum(heights) + PAD_Y
         self._fit_pools(height)
         self._draw_fuel(height - PAD_Y)
-        bar_w = HUD_WIDTH - 2 * PAD_X
         top = height - PAD_Y - fuel_h
         for sl, block_h in zip(pools, heights):
             top -= block_h
@@ -762,8 +1110,13 @@ class UsageHUD(NSObject):
             _set_text(pct, sl.value_text(), color=pct_color)
             self._track_breakdown(pct)
 
-            bar_y = name_y - 8 - POOL_BAR_H
-            self._add_pool_bar(PAD_X, bar_y, bar_w, sl.usage_pct, pct_color)
+            master = sl.label == plan and not snap.error
+            bar_h = MASTER_BAR_H if master else POOL_BAR_H
+            bar_y = name_y - 8 - bar_h
+            if master and parts:
+                self._add_stacked_bar(PAD_X, bar_y, bar_w, parts, bar_h)
+            else:
+                self._add_pool_bar(PAD_X, bar_y, bar_w, sl.usage_pct, pct_color)
 
             reset_y = bar_y - 6 - POOL_RESET_H
             reset = _make_text_field(
@@ -780,18 +1133,21 @@ class UsageHUD(NSObject):
             _set_text(reset, reset_text, color=_TELEM_VALUE)
             self._track_breakdown(reset)
 
-            if footnote and sl.label == plan:
+            if master and parts:
+                self._draw_legend(parts, PAD_X, reset_y - 4 - legend_h, bar_w)
+            if master and extra:
+                note_y = reset_y - 4 - legend_h - extra_h
                 note = _make_text_field(
                     PAD_X,
-                    reset_y - 16,
+                    note_y,
                     bar_w,
-                    16,
+                    extra_h,
                     size=LABEL_SIZE,
                     weight=NSFontWeightRegular,
                     color=_TEXT_MUTED,
                     mono=True,
                 )
-                _set_text(note, footnote, color=_TEXT_MUTED)
+                _set_text(note, extra, color=_TEXT_MUTED)
                 self._track_breakdown(note)
 
     # ------------------------------------------------------------------

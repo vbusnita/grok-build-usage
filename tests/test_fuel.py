@@ -77,6 +77,7 @@ def test_first_sample_does_not_treat_history_as_pace():
     assert reading.level == "hard"
     assert reading.amount_text() == "9M"
     assert "last turn 2.5M" in reading.detail_text()
+    assert reading.detail_lines() == ("hard", "Build", "last turn", "2.5M")
 
 
 def test_pace_follows_new_tokens_then_settles():
@@ -89,6 +90,7 @@ def test_pace_follows_new_tokens_then_settles():
     assert hot.rate_per_min == 1_200_000
     assert hot.level == "hard"
     assert hot.detail_text() == "hard · Build · 1.2M/min"
+    assert hot.detail_lines() == ("hard", "Build", "1.2M/min")
 
     quiet = meter.observe(
         [_burn("s1", 1_600_000, 70)],
@@ -100,6 +102,7 @@ def test_pace_follows_new_tokens_then_settles():
     assert quiet.level == "quiet"
     assert quiet.tokens == 1_600_000
     assert quiet.detail_text() == "quiet · Build"
+    assert quiet.detail_lines() == ("quiet", "Build")
 
 
 def test_bot_burn_is_the_rise_after_the_baseline_and_adds_to_build():
@@ -107,6 +110,7 @@ def test_bot_burn_is_the_rise_after_the_baseline_and_adds_to_build():
     first = meter.observe([], 75_000_000, NOW, mono=0.0)
     assert first.sources == ()
     assert first.amount_text() == "—"
+    assert first.detail_lines() == ("no live session",)
 
     bot = meter.observe([], 75_050_000, NOW + timedelta(seconds=30), mono=30.0)
     assert bot.sources == ("Bot",)
@@ -251,6 +255,7 @@ def test_cursor_chat_is_fuel_when_the_tui_is_closed():
     assert reading.tokens == 85_000
     assert reading.amount_text() == "85k"
     assert reading.detail_text() == "quiet · Cursor"
+    assert reading.detail_lines() == ("quiet", "Cursor")
 
 
 def test_build_and_cursor_sessions_add(tmp_path):

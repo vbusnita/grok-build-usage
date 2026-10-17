@@ -80,6 +80,18 @@ class FuelReading:
             return f"{text} · last turn {format_tokens(self.last_turn_tokens)}"
         return text
 
+    def detail_lines(self) -> tuple[str, ...]:
+        """Pace, each source, and the rate, one short line for the dial."""
+        if not self.sources:
+            return ("no live session",)
+        lines = [self.level, *self.sources]
+        if self.rate_per_min is not None and self.rate_per_min >= _EASY_PER_MIN:
+            lines.append(f"{format_tokens(int(self.rate_per_min))}/min")
+        elif self.fresh and self.last_turn_tokens:
+            lines.append("last turn")
+            lines.append(format_tokens(self.last_turn_tokens))
+        return tuple(lines)
+
     def menu_text(self) -> str:
         if not self.sources:
             return "Fuel  —"

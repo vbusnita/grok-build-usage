@@ -33,6 +33,20 @@ def test_token_total_from_spend_sums_rows():
     assert total == 1250
 
 
+def test_unified_cursor_plan_is_flagged():
+    sl = slice_from_sand_status(
+        {
+            "usagePercent": 50.3,
+            "grokPlanLabel": "Grok Bot Plan",
+            "cursorPlanName": "Super",
+            "isUnified": True,
+        }
+    )
+    assert sl.unified is True
+    assert sl.cursor_plan == "Super"
+    assert sl.plan == "Grok Bot Plan"
+
+
 def test_sand_status_without_percent():
     sl = slice_from_sand_status({"grokPlanLabel": "SuperGrok Plus"})
     assert sl.usage_pct is None

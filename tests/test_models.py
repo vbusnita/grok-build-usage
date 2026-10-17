@@ -113,6 +113,47 @@ def test_product_breakdown_and_bot_row():
     assert any(line.startswith("Grok Bot  17% · Oct 9") for line in snap.menu_lines())
 
 
+def test_unified_super_is_one_colored_bar():
+    payload = {
+        "config": {
+            "creditUsagePercent": 50.0,
+            "currentPeriod": {
+                "type": "USAGE_PERIOD_TYPE_WEEKLY",
+                "end": "2026-10-20T13:14:05Z",
+            },
+            "productUsage": [
+                {"product": "GrokImagine", "usagePercent": 34.0},
+                {"product": "GrokBot", "usagePercent": 10.0},
+                {"product": "Cursor", "usagePercent": 3.0},
+                {"product": "GrokBuild", "usagePercent": 2.0},
+                {"product": "GrokChat", "usagePercent": 1.0},
+            ],
+        }
+    }
+    bot = UsageSlice(
+        label="Grok Bot",
+        usage_pct=50.3,
+        resets="Oct 20 09:14",
+        plan="Grok Bot Plan",
+        cursor_plan="Super",
+        unified=True,
+    )
+    snap = snapshot_from_billing(payload, bot=bot)
+    assert snap.plan_name() == "Super"
+    assert [sl.label for sl in snap.pools()] == ["Super"]
+    assert snap.menu_title() == "GBU · 50%"
+    assert snap.breakdown_parts() == [
+        ("Build", 2.0),
+        ("Chat", 1.0),
+        ("Imagine", 34.0),
+        ("Voice", 0.0),
+        ("Bot", 10.0),
+        ("Cursor", 3.0),
+    ]
+    assert "Bot 10%" in snap.breakdown_text()
+    assert "Cursor 3%" in snap.breakdown_text()
+
+
 def test_gauge_levels():
     ok = snapshot_from_billing({"config": {"creditUsagePercent": 26.0}})
     warn = snapshot_from_billing({"config": {"creditUsagePercent": 75.0}})

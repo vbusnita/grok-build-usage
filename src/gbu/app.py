@@ -149,6 +149,9 @@ class GrokBuildUsageApp(rumps.App):
     def _apply_menu_lines(self, snapshot: UsageSnapshot) -> None:
         lines = snapshot.menu_lines()
         self._build_line.title = lines[0] if lines else "Grok Build  …"
+        if snapshot.unified_plan():
+            self._bot_line.title = snapshot.breakdown_text()
+            return
         bot = next((line for line in lines if line.startswith("Grok Bot")), None)
         if bot is None and snapshot.bot is not None:
             bot = f"Grok Bot  {snapshot.bot.value_text()}"
@@ -348,20 +351,30 @@ class GrokBuildUsageApp(rumps.App):
             if win is None:
                 return False
             frame = win.frame()
-            # AppKit: origin bottom-left. Menu bar windows sit near top of screen.
+            # AppKit: origin bottom-left. Menu bar windows sit at the top of
+            # whichever display holds the menu bar, including one left of origin.
             from AppKit import NSScreen
 
-            screen = NSScreen.mainScreen()
-            if screen is None:
-                return float(frame.size.height) >= 20.0 and float(frame.origin.x) >= -1.0
-
-            sh = float(screen.frame().size.height)
-            # Healthy: non-zero height, x on-screen, y in upper half (menu bar).
-            return (
-                float(frame.size.height) >= 20.0
-                and float(frame.origin.x) >= -1.0
-                and float(frame.origin.y) > sh * 0.5
-            )
+            height = float(frame.size.height)
+            if height < 20.0:
+                return False
+            screens = list(NSScreen.screens() or [])
+            if not screens:
+                return float(frame.origin.x) >= -1.0
+            x = float(frame.origin.x)
+            y = float(frame.origin.y)
+            w = float(frame.size.width)
+            for screen in screens:
+                sf = screen.frame()
+                sx = float(sf.origin.x)
+                sy = float(sf.origin.y)
+                sw = float(sf.size.width)
+                top = sy + float(sf.size.height)
+                on_this_display = (x + w) > sx and x < (sx + sw)
+                in_menu_strip = (top - 80.0) < y < (top + 8.0)
+                if on_this_display and in_menu_strip:
+                    return True
+            return False
         except Exception:
             log.exception("status frame check failed")
             return False
