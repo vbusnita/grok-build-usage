@@ -71,7 +71,13 @@ _SHARED_SLICE = {
     "Voice": "Voice",
     "Grok Voice": "Voice",
 }
-_SHARED_ROW_LABELS = frozenset(_SHARED_SLICE)
+# On a unified Cursor plan these also draw that same week.
+_UNIFIED_EXTRA = {
+    "Grok Bot": "Bot",
+    "Cursor": "Cursor",
+}
+_MIX_ORDER = ("Build", "Chat", "Imagine", "Voice")
+_UNIFIED_ORDER = ("Build", "Chat", "Imagine", "Voice", "Bot", "Cursor")
 
 
 def product_label(raw: str) -> str:
@@ -97,6 +103,8 @@ class UsageSlice:
     resets: Optional[str] = None
     detail: Optional[str] = None
     plan: Optional[str] = None
+    cursor_plan: Optional[str] = None
+    unified: bool = False
 
     @property
     def pct_display(self) -> Optional[int]:
@@ -168,27 +176,46 @@ class UsageSnapshot:
         """Floor to match Build SpendingLimiter truncation."""
         return pct_display(self.usage_pct)
 
+    def unified_plan(self) -> bool:
+        """Cursor Super (and the same family) is one allowance for every product."""
+        return self.bot is not None and self.bot.unified and self.error is None
+
     def plan_name(self) -> str:
-        """Subscription that covers the shared week and grants Grok Bot."""
+        """Title of the allowance bar. Unified accounts use the Cursor plan name."""
+        if self.unified_plan():
+            name = (self.bot.cursor_plan or "").strip() if self.bot is not None else ""
+            return name or "Super"
         if self.bot is not None and self.bot.plan:
             return self.bot.plan
         if self.subscription_tier:
             return self.subscription_tier
         return "SuperGrok"
 
-    def breakdown_text(self) -> str:
-        """How the shared week was spent. Unlisted Chat, Imagine, and Voice are 0."""
-        spent = {"Build": 0.0, "Chat": 0.0, "Imagine": 0.0, "Voice": 0.0}
+    def _mix(self) -> tuple[dict[str, str], tuple[str, ...]]:
+        if self.unified_plan():
+            return {**_SHARED_SLICE, **_UNIFIED_EXTRA}, _UNIFIED_ORDER
+        return _SHARED_SLICE, _MIX_ORDER
+
+    def breakdown_parts(self) -> list[tuple[str, float]]:
+        """Spend slices for the plan bar, left to right. Missing products are 0."""
+        mapping, order = self._mix()
+        spent = {name: 0.0 for name in order}
         seen: set[str] = set()
         for product in self.products:
-            name = _SHARED_SLICE.get(product.label)
+            name = mapping.get(product.label)
             if name is None or product.usage_pct is None:
                 continue
             spent[name] = product.usage_pct
             seen.add(name)
         if "Build" not in seen and not seen:
             spent["Build"] = self.usage_pct
-        return " · ".join(f"{name} {pct_display(spent[name])}%" for name in ("Build", "Chat", "Imagine", "Voice"))
+        return [(name, spent[name]) for name in order]
+
+    def breakdown_text(self) -> str:
+        """How the week was spent. Products missing from the bill show 0%."""
+        return " · ".join(
+            f"{name} {pct_display(pct)}%" for name, pct in self.breakdown_parts()
+        )
 
     def plan_note(self) -> str:
         """Product mix under the plan, then credits when they exist."""
@@ -199,14 +226,15 @@ class UsageSnapshot:
         return mix
 
     def pools(self) -> list[UsageSlice]:
-        """The shared SuperGrok week, then any other product on that bill, then Grok Bot.
+        """One bar for a unified Cursor plan. A split plan keeps Grok Bot separate.
 
-        Chat, Imagine, and Voice stay in the week's note instead of their own
-        rows. Grok Bot keeps the separate clock from its own usage status.
+        Chat, Imagine, Voice, and on a unified plan Bot and Cursor, stay in
+        the week's note. Any other billed product still gets its own row.
         """
         if self.error:
             rows = [UsageSlice(label="Grok Build", usage_pct=None, detail=self.error)]
         else:
+            mapping, _order = self._mix()
             rows = [
                 UsageSlice(
                     label=self.plan_name(),
@@ -215,7 +243,7 @@ class UsageSnapshot:
                 )
             ]
             for product in self.products:
-                if product.label in _SHARED_ROW_LABELS or product.label == "Grok Bot":
+                if mapping.get(product.label) is not None or product.label == "Grok Bot":
                     continue
                 rows.append(
                     UsageSlice(
@@ -224,7 +252,7 @@ class UsageSnapshot:
                         resets=self.period_end_display,
                     )
                 )
-        if self.bot is not None:
+        if self.bot is not None and not self.unified_plan():
             rows.append(self.bot)
         return rows
 
@@ -252,6 +280,8 @@ class UsageSnapshot:
         if self.error:
             return "GBU · ?"
         title = f"GBU · {self.usage_pct_display}%"
+        if self.unified_plan():
+            return title
         bot_pct = self.bot.pct_display if self.bot is not None else None
         if bot_pct is not None:
             title = f"{title} · Bot {bot_pct}%"

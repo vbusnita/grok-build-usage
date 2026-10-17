@@ -4,11 +4,11 @@
 
 The overlay has three blocks:
 
-- **Fuel** — tokens in the live session. With the Grok Build TUI that is the burn from its session file. In Cursor it is the open chat’s context size, since Cursor does not write that file. The bar and the word (quiet, easy, steady, hard) are the pace, not a percent of the weekly allowance.
-- **The plan** — one shared pool (SuperGrok Plus, for example) for Build, Chat, Imagine, and Voice, with that pool’s own reset. A product you have not used since the reset shows 0%.
-- **Grok Bot** — its own allowance and its own reset. The plan name stays on the shared pool.
+- **Fuel** — tokens in the live session. With the Grok Build TUI that is the burn from its session file. In Cursor it is the open chat’s context size, since Cursor does not write that file. The dial and the word (quiet, easy, steady, hard) are the pace, not a percent of the weekly allowance.
+- **The plan** — one bar. On Cursor Super that bar is Super, and Build, Chat, Imagine, Voice, Bot, and Cursor are colored slices of it. A product you have not used since the reset shows 0% in the key. On an older split plan, Grok Bot keeps its own bar.
+- **Grok Bot** — only when it is a separate allowance, with its own reset. On Super it is a slice of the plan bar, not a second bar.
 
-The menu bar title stays short: `GBU · …% · Bot …%`.
+The menu bar title stays short: `GBU · …%`, and adds `Bot …%` only when Bot is its own allowance.
 
 Works with **your** logins. The shared pool reuses the session Grok Build already stores on disk. The Bot row reuses the signed-in Grok Bot Mac session. No separate API key.
 
@@ -16,7 +16,7 @@ Works with **your** logins. The shared pool reuses the session Grok Build alread
 
 ## Overlay
 
-Chrome-free floating panel, top to bottom: Fuel, the plan pool (percent, reset, and the Build / Chat / Imagine / Voice mix), then Grok Bot with its own percent and reset. Credits, pay as you go, and auto top-up appear on the plan note when the account has them.
+Chrome-free floating panel, top to bottom: a fuel dial, then the plan bar. The plan bar uses the usage-dashboard product hues, with a one-line key underneath. Grok Bot is a second bar only on a split plan. Credits, pay as you go, and auto top-up appear under the key when the account has them.
 
 Toggle the overlay from the menu bar anytime (**Hide / Show Overlay**).
 

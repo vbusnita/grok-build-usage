@@ -54,6 +54,18 @@ def slice_from_sand_status(payload: dict[str, Any]) -> UsageSlice:
         plan = ""
     plan = plan.strip()
 
+    cursor_plan = payload.get("cursorPlanName") or payload.get("cursor_plan_name") or ""
+    if not isinstance(cursor_plan, str):
+        cursor_plan = ""
+    cursor_plan = cursor_plan.strip()
+
+    unified_raw = payload.get("isUnified")
+    if unified_raw is None:
+        unified_raw = payload.get("is_unified")
+    unified = unified_raw is True or unified_raw == 1 or (
+        isinstance(unified_raw, str) and unified_raw.lower() == "true"
+    )
+
     reset_raw = payload.get("nextResetTimestampUtc") or payload.get("next_reset_timestamp_utc")
     reset = _parse_period_end(reset_raw if isinstance(reset_raw, str) else None)
 
@@ -68,6 +80,8 @@ def slice_from_sand_status(payload: dict[str, Any]) -> UsageSlice:
         resets=reset,
         detail=note,
         plan=plan or None,
+        cursor_plan=cursor_plan or None,
+        unified=unified,
     )
 
 
