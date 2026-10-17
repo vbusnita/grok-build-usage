@@ -2,14 +2,18 @@
 
 import json
 import os
+import sqlite3
 from datetime import datetime, timedelta, timezone
 
 from gbu.fuel import (
     FuelMeter,
     SessionBurn,
+    burn_from_composer,
     burn_from_usage,
     format_tokens,
     load_build_burns,
+    load_cursor_burns,
+    load_fuel_burns,
     select_build_burns,
 )
 
@@ -156,3 +160,115 @@ def test_load_build_burns_skips_old_files(tmp_path):
     assert burns[0].session_id == "live"
     assert burns[0].tokens == 12000
     assert burns[0].last_turn_tokens == 4000
+    assert burns[0].source == "Build"
+
+
+def _cursor_db(path, rows):
+    con = sqlite3.connect(path)
+    con.execute(
+        """
+        CREATE TABLE composerHeaders (
+            composerId TEXT PRIMARY KEY,
+            lastUpdatedAt INTEGER,
+            isArchived INTEGER,
+            isSubagent INTEGER
+        )
+        """
+    )
+    con.execute("CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value BLOB)")
+    for row in rows:
+        cid, age_sec, archived, draft, tokens = row[:5]
+        checkpoint_age = row[5] if len(row) > 5 else None
+        updated = NOW - timedelta(seconds=age_sec)
+        con.execute(
+            "INSERT INTO composerHeaders VALUES (?, ?, ?, 0)",
+            (cid, int(updated.timestamp() * 1000), archived),
+        )
+        payload = {
+            "composerId": cid,
+            "isDraft": draft,
+            "lastUpdatedAt": int(updated.timestamp() * 1000),
+            "text": "do not keep this",
+            "promptTokenBreakdown": {"totalUsedTokens": tokens, "maxTokens": 256000},
+        }
+        if checkpoint_age is not None:
+            checkpoint = NOW - timedelta(seconds=checkpoint_age)
+            payload["conversationCheckpointLastUpdatedAt"] = int(checkpoint.timestamp() * 1000)
+        con.execute(
+            "INSERT INTO cursorDiskKV VALUES (?, ?)",
+            (f"composerData:{cid}", json.dumps(payload)),
+        )
+    con.commit()
+    con.close()
+
+
+def test_burn_from_composer_uses_context_size_only():
+    burn = burn_from_composer(
+        {
+            "isDraft": False,
+            "text": "secret prompt",
+            "promptTokenBreakdown": {"totalUsedTokens": 85502, "maxTokens": 256000},
+        },
+        session_id="chat-1",
+        updated_at=NOW,
+    )
+    assert burn is not None
+    assert burn.tokens == 85502
+    assert burn.source == "Cursor"
+    assert burn.last_turn_tokens is None
+    assert burn_from_composer({"isDraft": True, "promptTokenBreakdown": {"totalUsedTokens": 10}}, session_id="d", updated_at=NOW) is None
+    assert burn_from_composer({"promptTokenBreakdown": {"totalUsedTokens": 10}}, session_id="draft-1", updated_at=NOW) is None
+
+
+def test_load_cursor_burns_keeps_recent_open_chats(tmp_path):
+    db = tmp_path / "state.vscdb"
+    _cursor_db(
+        db,
+        [
+            ("live", 30, 0, False, 85000),
+            ("quiet", 400, 0, False, 40000),
+            ("old", 3000, 0, False, 90000),
+            ("running", 3000, 0, False, 110000, 20),
+            ("archived", 10, 1, False, 20000),
+            ("draft-box", 10, 0, True, 15000),
+        ],
+    )
+    burns = load_cursor_burns(db, now=NOW)
+    assert {b.session_id for b in burns} == {"live", "quiet", "running"}
+    running = next(b for b in burns if b.session_id == "running")
+    assert running.updated_at == NOW - timedelta(seconds=20)
+    live = next(b for b in burns if b.session_id == "live")
+    assert live.tokens == 85000
+    assert live.source == "Cursor"
+    assert load_cursor_burns(tmp_path / "missing.vscdb", now=NOW) == []
+
+
+def test_cursor_chat_is_fuel_when_the_tui_is_closed():
+    meter = FuelMeter()
+    burn = SessionBurn("c1", 85_000, NOW - timedelta(seconds=10), source="Cursor")
+    reading = meter.observe([burn], None, NOW, mono=10.0)
+    assert reading.sources == ("Cursor",)
+    assert reading.tokens == 85_000
+    assert reading.amount_text() == "85k"
+    assert reading.detail_text() == "quiet · Cursor"
+
+
+def test_build_and_cursor_sessions_add(tmp_path):
+    sessions = tmp_path / "sessions"
+    live = sessions / "proj" / "tui"
+    live.mkdir(parents=True)
+    (live / "usage.json").write_text(
+        json.dumps(
+            {
+                "updatedAt": (NOW - timedelta(seconds=20)).isoformat(),
+                "session": {"totalTokens": 1_000_000},
+            }
+        ),
+        encoding="utf-8",
+    )
+    db = tmp_path / "state.vscdb"
+    _cursor_db(db, [("chat", 15, 0, False, 80_000)])
+    burns = load_fuel_burns(now=NOW, sessions=sessions, cursor_db=db)
+    reading = FuelMeter().observe(burns, None, NOW, mono=5.0)
+    assert reading.sources == ("Build", "Cursor")
+    assert reading.tokens == 1_080_000

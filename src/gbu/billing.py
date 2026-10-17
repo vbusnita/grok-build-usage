@@ -15,7 +15,14 @@ from typing import Any, Optional
 
 import requests
 
-from gbu.auth import AuthError, GrokAuth, client_version, load_auth
+from gbu.auth import (
+    AuthError,
+    GrokAuth,
+    access_expired,
+    client_version,
+    load_auth,
+    refresh_auth,
+)
 from gbu.bot_usage import fetch_bot_slice
 from gbu.models import UsageSnapshot, snapshot_from_billing
 
@@ -107,8 +114,20 @@ def _load_build(
     except AuthError as exc:
         return {}, None, str(exc)
     try:
+        auth = _refreshed(auth)
         billing = fetch_billing_raw(auth, proxy_base=proxy_base)
     except BillingError as exc:
+        if not _auth_rejected(exc):
+            return {}, None, str(exc)
+        try:
+            auth = refresh_auth(auth)
+            log.info("refreshed grok session after billing rejected the access token")
+            billing = fetch_billing_raw(auth, proxy_base=proxy_base)
+        except AuthError as refresh_exc:
+            return {}, None, str(refresh_exc)
+        except BillingError as retry_exc:
+            return {}, None, str(retry_exc)
+    except AuthError as exc:
         return {}, None, str(exc)
     except Exception as exc:  # noqa: BLE001 — surface any surprise as HUD text
         log.exception("unexpected billing failure")
@@ -141,6 +160,18 @@ def fetch_snapshot(
     if error:
         return snapshot_from_billing({}, bot=bot, error=error)
     return snapshot_from_billing(billing, auto_topup=auto, bot=bot)
+
+
+def _refreshed(auth: GrokAuth) -> GrokAuth:
+    """Refresh before the call when the stored access token is already stale."""
+    if not auth.can_refresh or not access_expired(auth):
+        return auth
+    log.info("grok access token expired — refreshing without opening the TUI")
+    return refresh_auth(auth)
+
+
+def _auth_rejected(exc: BillingError) -> bool:
+    return str(exc).startswith("Auth rejected")
 
 
 def _error_detail(resp: requests.Response) -> str:

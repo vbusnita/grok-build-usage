@@ -47,13 +47,13 @@ def main(argv: list[str] | None = None) -> int:
 
         from gbu.billing import fetch_snapshot
         from gbu.bot_usage import fetch_bot_token_total
-        from gbu.fuel import FuelMeter, load_build_burns
+        from gbu.fuel import FuelMeter, load_fuel_burns
 
         snap = fetch_snapshot()
         for line in snap.summary_lines():
             print(line)
         reading = FuelMeter().observe(
-            load_build_burns(),
+            load_fuel_burns(),
             fetch_bot_token_total(),
             datetime.now().astimezone(),
             time.monotonic(),
